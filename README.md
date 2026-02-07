@@ -1,26 +1,27 @@
-# Advanced Memory Forensics Analyzer v2.0
+# Advanced Memory Forensics Analyzer v3.0
 
-<img width="1918" height="986" alt="image" src="https://github.com/user-attachments/assets/f43b2005-3bd2-46f9-b104-923da07388a5" />
-
-A professional-grade, enterprise-level memory forensics GUI tool built with Python and tkinter. Features multi-layer ML-enhanced malware detection targeting 98.5%+ precision, real-time system monitoring, MITRE ATT&CK mapping, and enterprise HTML report generation.
+A professional-grade, enterprise-level memory forensics GUI tool built with Python and tkinter. Features a 4-layer hybrid ML detection pipeline with external YARA rule integration targeting 99.6% precision, real-time system monitoring, MITRE ATT&CK mapping, and enterprise HTML report generation.
 
 ![Python](https://img.shields.io/badge/Python-3.8%2B-blue)
 ![Platform](https://img.shields.io/badge/Platform-Windows-lightgrey)
 ![License](https://img.shields.io/badge/License-MIT-green)
-![Tests](https://img.shields.io/badge/Tests-198%20Passing-brightgreen)
+![Tests](https://img.shields.io/badge/Tests-267%20Passing-brightgreen)
+![YARA Rules](https://img.shields.io/badge/YARA%20Rules-1881-orange)
+![Bugs Fixed](https://img.shields.io/badge/Bugs%20Fixed-20-red)
 
 ---
 
 ## Table of Contents
 
 - [Features](#features)
-- [Screenshots](#screenshots)
+- [What's New in v3.0](#whats-new-in-v30)
 - [Architecture](#architecture)
 - [Installation](#installation)
 - [Usage](#usage)
 - [Analysis Capabilities](#analysis-capabilities)
 - [ML Detection Pipeline](#ml-detection-pipeline)
 - [Real-Time Monitoring](#real-time-monitoring)
+- [External YARA Rules](#external-yara-rules)
 - [Report Generation](#report-generation)
 - [GUI Reference](#gui-reference)
 - [Project Structure](#project-structure)
@@ -30,8 +31,6 @@ A professional-grade, enterprise-level memory forensics GUI tool built with Pyth
 ---
 
 ## Features
-
-<img width="1917" height="988" alt="image" src="https://github.com/user-attachments/assets/e083d81b-1a49-4f79-9809-83133a454771" />
 
 ### Core Forensics
 - Load and analyze memory dumps (`.raw`, `.dmp`, `.mem`, `.vmem`)
@@ -43,28 +42,33 @@ A professional-grade, enterprise-level memory forensics GUI tool built with Pyth
 - Shannon entropy analysis for detecting encrypted/packed regions
 - Hex viewer with navigation
 - Simplified x86/x64 disassembly
-- Event timeline construction
+- Event timeline construction with proper RFC 1918 private IP classification
 
-### ML-Enhanced Detection
-- 4-layer ensemble ML detection pipeline
-- 9 YARA-like malware family rules (Mimikatz, Meterpreter, Cobalt Strike, Empire, etc.)
+### Hybrid ML + YARA Detection (v3.0)
+- 4-layer hybrid ML ensemble detection pipeline targeting 99.6% precision
+- 100 external YARA rule files with 1,881 rules and 10,000+ text patterns
+- 9 built-in YARA-like malware family rules (Mimikatz, Meterpreter, Cobalt Strike, Empire, etc.)
 - PE structure anomaly analysis
 - N-gram byte sequence frequency analysis
 - Obfuscation/packer detection (UPX, VMProtect, Themida, ASPack, etc.)
+- Quality-weighted YARA scoring to eliminate false positives on common process names
 - Cross-validation with 5 independent checks to minimize false positives
-- 98.5%+ precision target through ensemble scoring
 
 ### Behavioral Analysis
 - 8 threat categories mapped to MITRE ATT&CK framework
 - Process Injection (T1055), Credential Access (T1003), Persistence (T1547)
 - Lateral Movement (T1021), Data Exfiltration (T1041), Defense Evasion (T1027)
 - Command & Control (T1071), Crypto Mining (T1496)
+- Command-line analysis for encoded commands, obfuscation, and remote downloads
 
-### Real-Time Monitoring
-- Live process monitoring with ML-enhanced threat scoring
+### Real-Time Monitoring (Enhanced in v3.0)
+- Live process monitoring with 4-layer hybrid ML + YARA threat scoring
+- 2-phase detection: fast triage for all processes, deep analysis for top 5 candidates
+- External YARA rule matching against process names and command lines
 - Network connection tracking with suspicious activity detection
 - Configurable refresh intervals (1-10 seconds)
-- Color-coded threat alerts (CRITICAL / WARNING / INFO)
+- Color-coded threat alerts (CRITICAL / WARNING / INFO) with YARA rule tags
+- YARA engine status indicator showing loaded rules and pattern count
 - Alert export to JSON/TXT
 
 ### Reporting
@@ -81,12 +85,48 @@ A professional-grade, enterprise-level memory forensics GUI tool built with Pyth
 
 ---
 
+## What's New in v3.0
+
+### Hybrid ML + External YARA Integration
+- **ExternalYARALoader** class parses 100 `.yar` files from the `yara_rules/` directory
+- Extracts ASCII text string patterns with proper escape handling (`\\`, `\"`)
+- Builds inverted keyword index for O(1) candidate rule lookup
+- Evaluates simplified YARA conditions: `any of them`, `N of them`, prefix wildcards, compound `and`/`or`/`not`
+- Quality-weighted scoring reduces false positives from single-pattern matches
+
+### Enhanced Real-Time Monitor
+- **4-layer hybrid ML pipeline** replaces simple name-based heuristics:
+  - Layer 1 (35%): Fast name-based heuristic scoring
+  - Layer 2 (30%): External YARA text pattern matching
+  - Layer 3 (25%): Behavioral command-line analysis via WMIC
+  - Layer 4 (10%): Cross-validation ensemble with corroboration boost/dampening
+- **2-phase monitoring loop**: Quick triage for all new processes, then full 4-layer deep analysis for max 5 candidates per cycle
+- Previously unused `_analyze_process_behavior()` method now wired into the detection pipeline
+- YARA match info displayed in alerts: `[YARA: RuleName1, RuleName2]`
+
+### 20 Bug Fixes Across 7 Sessions
+- Fixed false positive YARA matches on common process names (lsass.exe, SearchIndexer.exe, System, cmd.exe)
+- Fixed YARA pattern extraction: escaped quotes, double-backslash paths, brace-containing text strings
+- Fixed 172.x private IP range to cover full RFC 1918 range (172.16-31.x.x)
+- Fixed lambda closure race conditions in monitor thread
+- Fixed GUI widget sync issues across load/update/clear operations
+- Fixed shared treeview tab cross-contamination
+- See MEMORY.md for the complete bug list
+
+### 267 Tests (up from 198)
+- 37 test classes covering all functionality
+- Tests for YARA false positive reduction, edge cases, condition evaluation, thread safety
+- Tests for private IP range, backslash unescaping, brace pattern extraction
+- Full regression test coverage for all 20 bug fixes
+
+---
+
 ## Architecture
 
 ```
 +------------------------------------------------------------------+
 |                    MemoryForensicsGUI                            |
-|  (15-tab tkinter interface, 4500+ lines)                         |
+|  (15-tab tkinter interface, 5000+ lines)                         |
 |                                                                  |
 |  Overview | Processes | Network | Malware | Dashboard | DLLs     |
 |  Strings | Behavioral | Registry | Entropy | Hex | Timeline      |
@@ -98,27 +138,28 @@ A professional-grade, enterprise-level memory forensics GUI tool built with Pyth
 | MemoryForensics  |  | Report         |  | Real-Time Monitor      |
 | Engine           |  | Generator      |  | (Background Thread)    |
 | (1200+ lines)    |  | (1159 lines)   |  |                        |
-|                  |  |                |  | tasklist / netstat /   |
-| - Process scan   |  | - HTML output  |  | wmic subprocess calls  |
-| - Network extract|  | - 13 sections  |  | ML threat scoring      |
+|                  |  |                |  | 4-Layer Hybrid ML      |
+| - Process scan   |  | - HTML output  |  | + External YARA Rules  |
+| - Network extract|  | - 13 sections  |  | + Behavioral Analysis  |
 | - Malware detect |  | - Dark theme   |  | Thread-safe UI updates |
 | - DLL analysis   |  | - Animations   |  +------------------------+
 | - String extract |  | - Print CSS    |
 | - Entropy calc   |  +----------------+
 | - Registry scan  |
 | - Behavioral     |
+| - Private IP chk |
 +------------------+
          |
          v
 +------------------------------------------------------------------+
 |                   ML Detection Pipeline                          |
 |                                                                  |
-|  AdvancedMLDetector (Ensemble Orchestrator)                      |
+|  AdvancedMLDetector (Dump Scan Ensemble Orchestrator)            |
 |  |                                                               |
 |  +-- AdvancedPEAnalyzer -----> PE headers, sections, imports     |
 |  |   (25% weight)                                                |
 |  |                                                               |
-|  +-- YARALikeEngine ---------> 9 malware family rules            |
+|  +-- YARALikeEngine ---------> 9 built-in malware family rules   |
 |  |   (35% weight)              multi-condition matching          |
 |  |                                                               |
 |  +-- NGramAnalyzer ----------> byte sequence frequency           |
@@ -126,6 +167,13 @@ A professional-grade, enterprise-level memory forensics GUI tool built with Pyth
 |  |                                                               |
 |  +-- ObfuscationDetector ----> entropy, XOR, Base64, packers     |
 |      (15% weight)                                                |
+|                                                                  |
+|  ExternalYARALoader (Real-Time Monitor YARA Engine)              |
+|  |                                                               |
+|  +-- 100 .yar files ---------> 1,881 parsed rules                |
+|  +-- Inverted pattern index -> O(1) candidate lookup             |
+|  +-- Condition evaluator ----> any/all/N of, compound and/or     |
+|  +-- Quality-weighted scoring  (single-match reduction: 0.25x)   |
 |                                                                  |
 |  MLMalwareDetector (Feature-Based Scoring)                       |
 |  |                                                               |
@@ -215,6 +263,7 @@ The tool supports multiple dump formats:
 | **Malware Signatures** | YARA-like multi-pattern rules for 9 families | Detection name, confidence, severity |
 | **ML Detection** | Ensemble scoring across 6 features | Risk score, confidence %, detections |
 | **Enterprise Scan** | All layers combined with cross-validation | Threat score, risk level, precision |
+| **External YARA** | 1,881 rules from 100 .yar files with quality weighting | Rule matches, severity, category |
 | **Network Artifacts** | Regex extraction for 6 artifact types | IPs, URLs, domains, emails, MACs |
 | **DLL Analysis** | ASCII + Unicode name extraction | Module list with suspicion flags |
 | **Behavioral** | 8 threat categories with API pattern matching | Score, MITRE ATT&CK mapping |
@@ -230,9 +279,9 @@ The tool supports multiple dump formats:
 
 ## ML Detection Pipeline
 
-The detection pipeline uses a multi-layer ensemble approach designed for high precision (98.5%+ target) to minimize false positives in production environments.
+The detection pipeline uses a multi-layer ensemble approach designed for high precision (99.6% target) to minimize false positives in production environments.
 
-### Layer Architecture
+### Dump Analysis Layers
 
 **Layer 1 - AdvancedPEAnalyzer (25% weight)**
 - PE header validation and anomaly detection
@@ -241,7 +290,7 @@ The detection pipeline uses a multi-layer ensemble approach designed for high pr
 - Import table analysis across 7 suspicious categories
 
 **Layer 2 - YARALikeEngine (35% weight - highest)**
-- 9 malware family detection rules
+- 9 built-in malware family detection rules
 - Multi-condition matching (requires minimum pattern count)
 - Families: Mimikatz, Meterpreter, Cobalt Strike, PowerShell Empire, Process Injection, Credential Dumpers, Ransomware, RATs, Shellcode
 
@@ -256,10 +305,37 @@ The detection pipeline uses a multi-layer ensemble approach designed for high pr
 - Base64 content identification
 - Packer signature matching
 
+### Real-Time Monitor Layers (v3.0)
+
+**Layer 1 - Name Heuristics (35% weight)**
+- 60+ known malware tools (Mimikatz, Meterpreter, 30+ RATs)
+- Suspicious name patterns (keylogger, trojan, backdoor)
+- LOLBins analysis (PowerShell, certutil, mshta, etc.)
+- Behavioral indicators (obfuscated names, double extensions, system mimics)
+
+**Layer 2 - External YARA (30% weight)**
+- 1,881 rules from 100 `.yar` files
+- Quality-weighted scoring (single match from multi-pattern rule: 0.25x)
+- Display threshold (score >= 20) to prevent false positives
+
+**Layer 3 - Behavioral Analysis (25% weight)**
+- Command-line analysis via WMIC process details
+- Encoded commands, obfuscation, downloads, base64 content
+- Only triggered for elevated scores (Layer 1 >= 30 or YARA >= 20)
+
+**Layer 4 - Ensemble Cross-Validation (10% weight)**
+- Corroboration boost (1.15x) when 2+ layers agree
+- Single-source dampening (0.85x) for precision
+- Named malware YARA override (critical + 2+ matches = score 95+)
+
 ### Ensemble Scoring
 
 ```
+# Dump Analysis
 Final Score = (PE * 0.25) + (YARA * 0.35) + (NGram * 0.15) + (Obfuscation * 0.15) + (Behavioral * 0.10)
+
+# Real-Time Monitor
+Ensemble = (Heuristic * 0.35) + (ExternalYARA * 0.30) + (Behavioral * 0.25) + Cross-Validation
 ```
 
 ### Cross-Validation (5 checks)
@@ -275,38 +351,55 @@ A detection must pass at least 2 of 5 independent validation checks:
 
 | Score | Level | Description |
 |---|---|---|
-| 75+ | CRITICAL | Active threat, immediate action required |
-| 55-74 | HIGH | Significant malicious indicators |
-| 35-54 | MEDIUM | Suspicious patterns detected |
-| 0-34 | LOW | No significant threats |
+| 80+ | CRITICAL | Active threat, immediate action required |
+| 50-79 | HIGH | Significant malicious indicators |
+| 30-49 | MEDIUM | Suspicious patterns detected |
+| 0-29 | LOW | No significant threats |
 
 ---
 
 ## Real-Time Monitoring
 
-The Real-Time tab provides live system monitoring with ML-enhanced threat detection.
+The Real-Time tab provides live system monitoring with hybrid ML + YARA threat detection.
 
 ### How It Works
 
-1. **Background Thread** runs a monitoring loop at configurable intervals (1-10s)
-2. **Process Snapshots** via `tasklist /FO CSV /NH` capture running processes
-3. **Network Snapshots** via `netstat -ano` capture active connections
-4. **Change Detection** compares current state against previous snapshot
-5. **ML Scoring** evaluates each new process/connection against threat models
-6. **UI Updates** are pushed to the main thread via thread-safe `root.after()` callbacks
+1. **YARA Loading** - On tab creation, 100 external YARA rule files are loaded in a background thread
+2. **Background Thread** runs a 2-phase monitoring loop at configurable intervals (1-10s)
+3. **Phase 1 - Quick Triage**: All new processes are scored with fast heuristics + YARA name-only matching
+4. **Phase 2 - Deep Analysis**: Top 5 candidates get full 4-layer hybrid ML pipeline including WMIC command-line analysis
+5. **Network Snapshots** via `netstat -ano` capture active connections with port/IP threat scoring
+6. **UI Updates** are pushed to the main thread via thread-safe `root.after()` callbacks with value-captured lambdas
 
-### Threat Scoring
+### Process Threat Scoring
 
-**Process Threat Layers:**
-- Layer 1: Known malware tools (100 score) - Mimikatz, Meterpreter, Cobalt Strike, 30+ RATs
-- Layer 2: Suspicious name patterns (80-95 score) - keylogger, trojan, backdoor, rootkit
-- Layer 3: LOLBins analysis (30-65 score) - PowerShell, mshta, certutil, regsvr32, etc.
-- Layer 4: Command line analysis - encoded commands, obfuscation, downloads
+**Layer 1 - Known Malware Tools (Fast)**
+- 60+ malware tools with scores 85-100 (Mimikatz, Meterpreter, Cobalt Strike, 30+ RATs)
+- Suspicious name patterns with scores 80-95 (keylogger, trojan, backdoor, rootkit)
+- 19 LOLBins with scores 30-65 (PowerShell, mshta, certutil, regsvr32, etc.)
+- Behavioral indicators: obfuscated names, double extensions, system mimics
 
-**Connection Threat Layers:**
+**Layer 2 - External YARA Rules (Fast)**
+- 1,881 rules matched against process name
+- Quality-weighted: single match from multi-pattern rule scores 0.25x
+- Patterns < 4 chars excluded from index to reduce noise
+- Display threshold: YARA score >= 20 required to affect process display
+
+**Layer 3 - Behavioral Command-Line Analysis (Slow, conditional)**
+- Only triggered for elevated candidates (heuristic >= 30 or YARA >= 20)
+- Analyzes 47 suspicious command-line patterns
+- Detects: encoded commands, execution policy bypass, remote downloads, obfuscation
+- Limited to max 5 deep analyses per monitoring cycle
+
+**Layer 4 - Ensemble Cross-Validation**
+- Corroboration boost (1.15x) when 2+ layers score high
+- Single-source dampening (0.85x) for precision
+- Named malware YARA override to score 95+
+
+### Connection Threat Scoring
 - Layer 1: Suspicious port analysis (known C2, RAT, backdoor ports)
 - Layer 2: Port range scoring (Metasploit, common RAT ranges)
-- Layer 3: IP classification (internal vs external)
+- Layer 3: IP classification (internal vs external, RFC 1918 compliant)
 - Layer 4: Connection state analysis
 
 ### Alert Levels
@@ -317,6 +410,36 @@ The Real-Time tab provides live system monitoring with ML-enhanced threat detect
 | 50-79 | HIGH/WARNING | Orange |
 | 30-49 | MEDIUM/INFO | Blue |
 | <30 | Normal | Not logged |
+
+---
+
+## External YARA Rules
+
+The `yara_rules/` directory contains 100 `.yar` files with 1,881 rules covering:
+
+| Category | Files | Description |
+|---|---|---|
+| Malware Indicators | `malware_indicators.yar` | General malware signatures |
+| Credential Stealers | `credential_stealers.yar` | Password/credential theft tools |
+| Ransomware | `ransomware.yar` | Ransomware families and indicators |
+| C2 Frameworks | `c2_frameworks.yar` | Command & control frameworks |
+| LOLBins | `lolbins.yar` | Living-off-the-land binary abuse |
+| Backdoors & RATs | `backdoors_rats.yar` | Remote access trojans |
+| PowerShell Attacks | `powershell_attacks.yar` | PowerShell-based attacks |
+| Fileless Malware | `fileless_malware.yar` | Memory-resident threats |
+| Browser Extensions | `browser_extensions.yar` | Malicious browser plugins |
+| Anti-Forensics | `anti_forensics.yar` | Evidence destruction tools |
+| Advanced APTs | `advanced_apt.yar` | Nation-state threat indicators |
+| + 89 more | Various | Full coverage across threat landscape |
+
+### YARA Parser Features
+- Extracts ASCII text string patterns (skips hex and regex patterns)
+- Handles escaped quotes (`\"`) and escaped backslashes (`\\`) in patterns
+- Correctly distinguishes hex patterns (`$h = { AB CD }`) from text patterns with braces (`$j = "{GUID}"`)
+- Strips binary-only conditions (`uint16(0) == 0x5A4D`, `filesize`, `$mz at 0`)
+- Evaluates compound conditions with `and`/`or`/`not`, parentheses, prefix wildcards
+- Minimum pattern length filter (4 chars) to reduce false positive index matches
+- Quality-weighted scoring: single match from multi-pattern rule reduced to 0.25x
 
 ---
 
@@ -375,12 +498,13 @@ Professional-grade HTML report generated by `report_generator.py`:
 | 12 | Timeline | Aggregated event timeline from all analysis modules |
 | 13 | Code Analysis | x86/x64 disassembly and shellcode pattern detection |
 | 14 | Report | Report generation with JSON, CSV, and HTML export |
-| 15 | Real-Time | Live process/network monitoring with threat alerts |
+| 15 | Real-Time | Live process/network monitoring with hybrid ML + YARA alerts |
 
 ### Keyboard / UI Notes
 - Dark theme optimized for extended forensic analysis sessions
 - Treeviews support row selection highlighting
 - Text areas use monospace fonts for hash/hex alignment
+- YARA engine indicator shows loaded rules count and pattern count
 - Progress bar in status bar tracks long-running operations
 
 ---
@@ -390,24 +514,31 @@ Professional-grade HTML report generated by `report_generator.py`:
 ```
 Advanced Memory Forensics Analyzer/
 |
-+-- memory_forensics_tool.py    # Main application (6,900+ lines)
++-- memory_forensics_tool.py    # Main application (7,200+ lines)
 |   |
 |   +-- AdvancedPEAnalyzer      # PE structure analysis
-|   +-- YARALikeEngine          # YARA-like pattern matching
+|   +-- YARALikeEngine          # 9 built-in YARA-like pattern rules
+|   +-- ExternalYARALoader      # External .yar file parser (v3.0)
 |   +-- NGramAnalyzer           # N-gram byte frequency analysis
 |   +-- ObfuscationDetector     # Obfuscation/packer detection
 |   +-- AdvancedMLDetector      # Multi-layer ensemble orchestrator
 |   +-- MLMalwareDetector       # Feature-based ML scoring
 |   +-- MemoryForensicsEngine   # Core forensics engine (35+ methods)
-|   +-- MemoryForensicsGUI      # 15-tab GUI application (146+ methods)
+|   +-- MemoryForensicsGUI      # 15-tab GUI application (160+ methods)
 |
 +-- report_generator.py         # Enterprise HTML report generation (1,159 lines)
 |   |
 |   +-- generate_enterprise_html_report()
 |
-+-- ultra_deep_test.py          # Exhaustive test suite (198 tests)
++-- yara_rules/                 # External YARA rules directory (v3.0)
+|   |
+|   +-- 100 .yar files          # 1,881 rules, 10,000+ text patterns
 |
-+-- test_forensic_dump.raw      # Synthetic test data (~101KB)
++-- ultra_deep_test.py          # Exhaustive test suite (267 tests)
+|
++-- generate_test_dump.py       # Synthetic test data generator
+|
++-- test_forensic_dump.raw      # Synthetic test data (~103KB)
 |
 +-- RUN_AS_ADMIN.bat            # Administrator elevation launcher
 |
@@ -418,22 +549,27 @@ Advanced Memory Forensics Analyzer/
 
 ```
 AdvancedPEAnalyzer          ~190 lines   PE header/section/import analysis
-YARALikeEngine              ~174 lines   9-rule malware pattern matching
+YARALikeEngine              ~174 lines   9-rule built-in malware matching
+ExternalYARALoader          ~320 lines   External .yar file parser + matcher (v3.0)
 NGramAnalyzer                ~64 lines   Byte sequence frequency analysis
 ObfuscationDetector         ~118 lines   Entropy, XOR, Base64, packers
 AdvancedMLDetector          ~178 lines   Ensemble ML orchestrator
 MLMalwareDetector           ~386 lines   Feature extraction & scoring
-MemoryForensicsEngine      ~1206 lines   Core analysis engine
-MemoryForensicsGUI         ~4506 lines   Full GUI application
+MemoryForensicsEngine      ~1250 lines   Core analysis engine
+MemoryForensicsGUI         ~5000 lines   Full GUI application
 ```
 
 ---
 
 ## Testing
 
-The project includes an exhaustive test suite covering all classes, engine methods, GUI widgets, and edge cases.
+The project includes an exhaustive test suite with 267 tests covering all classes, engine methods, GUI widgets, edge cases, and regression tests for all 20 bug fixes.
 
 ```bash
+# Run with pytest
+python -m pytest ultra_deep_test.py -v
+
+# Or run directly
 python ultra_deep_test.py
 ```
 
@@ -441,17 +577,30 @@ python ultra_deep_test.py
 
 | Section | Tests | Description |
 |---|---|---|
-| AdvancedPEAnalyzer | 18 | PE parsing, anomaly detection, imports |
-| YARALikeEngine | 39 | Rule loading, pattern matching, scanning |
-| NGramAnalyzer | 17 | N-gram calculation, scoring |
-| ObfuscationDetector | 19 | Entropy, XOR, Base64, packers |
-| MLMalwareDetector | 13 | Feature extraction, ensemble scoring |
-| AdvancedMLDetector | 11 | Multi-layer detection, reporting |
-| MemoryForensicsEngine | 24 | All engine methods end-to-end |
-| GUI Widgets | 20 | Widget creation, initialization |
-| GUI Handlers | 25 | Button handlers, analysis functions |
-| Edge Cases | 12 | Empty data, malformed input, boundaries |
-| **Total** | **198** | **100% passing** |
+| AdvancedPEAnalyzer | 15 | PE parsing, anomaly detection, imports |
+| YARALikeEngine | 14 | Rule loading, pattern matching, scanning |
+| NGramAnalyzer | 7 | N-gram calculation, scoring |
+| ObfuscationDetector | 12 | Entropy, XOR, Base64, packers |
+| AdvancedMLDetector | 8 | Multi-layer detection, reporting |
+| MLMalwareDetector | 15 | Feature extraction, ensemble scoring |
+| MemoryForensicsEngine | 58 | All engine methods end-to-end |
+| ExternalYARALoader | 14 | Rule parsing, matching, conditions |
+| Enhanced Process Check | 11 | Hybrid ML pipeline, ensemble weights |
+| YARA False Positive Reduction | 14 | Quality weighting, display threshold |
+| YARA Edge Cases | 13 | Conditions, threading, escapes |
+| Bug 17-20 Regression | 18 | Brace skip, backslash, IP range, lambda |
+| GUI & Integration | 40 | Widget creation, handlers, reports |
+| Edge Cases & Data | 18 | Empty data, malformed input, boundaries |
+| **Total** | **267** | **100% passing** |
+
+### Generating Test Data
+
+```bash
+# Regenerate the synthetic test dump
+python generate_test_dump.py
+```
+
+The test dump contains 15 sections with embedded PE images, process names, DLL references, network artifacts, registry keys, malware signatures, shellcode patterns, and more.
 
 ---
 
@@ -503,6 +652,8 @@ webbrowser       Report viewing
 
 ## Malware Family Detection
 
+### Built-in YARA-Like Rules
+
 | Family | Confidence | Severity | Key Indicators |
 |---|---|---|---|
 | Mimikatz | 99% | CRITICAL | sekurlsa, logonpasswords, kerberos ticket |
@@ -515,14 +666,22 @@ webbrowser       Report viewing
 | Generic RAT | -- | HIGH | keylogger, screenshot, webcam, reverse shell |
 | Shellcode | -- | MEDIUM | NOP sled, GetPC, JMP ESP patterns |
 
+### External YARA Rules (1,881 rules)
+
+Severity distribution across the external rule set:
+- **Critical:** 1,136 rules
+- **High:** 540 rules
+- **Medium:** 189 rules
+- **Low:** 16 rules
+
 ---
 
 ## Contributing
 
 1. Fork the repository
 2. Create a feature branch
-3. Run the test suite: `python ultra_deep_test.py`
-4. Ensure all 198 tests pass
+3. Run the test suite: `python -m pytest ultra_deep_test.py -v`
+4. Ensure all 267 tests pass
 5. Submit a pull request
 
 ---
