@@ -29,6 +29,8 @@ A professional-grade, enterprise-level memory forensics GUI tool built with Pyth
 
 ## Features
 
+<img width="1917" height="988" alt="image" src="https://github.com/user-attachments/assets/e083d81b-1a49-4f79-9809-83133a454771" />
+
 ### Core Forensics
 - Load and analyze memory dumps (`.raw`, `.dmp`, `.mem`, `.vmem`)
 - Process detection via 4 independent methods (PE headers, EPROCESS structures, file references, known tool names)
