@@ -1,5 +1,7 @@
 # Advanced Memory Forensics Analyzer v2.0
 
+<img width="1918" height="986" alt="image" src="https://github.com/user-attachments/assets/f43b2005-3bd2-46f9-b104-923da07388a5" />
+
 A professional-grade, enterprise-level memory forensics GUI tool built with Python and tkinter. Features multi-layer ML-enhanced malware detection targeting 98.5%+ precision, real-time system monitoring, MITRE ATT&CK mapping, and enterprise HTML report generation.
 
 ![Python](https://img.shields.io/badge/Python-3.8%2B-blue)
