@@ -81,11 +81,11 @@ A professional-grade, enterprise-level memory forensics GUI tool built with Pyth
 
 ```
 +------------------------------------------------------------------+
-|                    MemoryForensicsGUI                             |
+|                    MemoryForensicsGUI                            |
 |  (15-tab tkinter interface, 4500+ lines)                         |
 |                                                                  |
 |  Overview | Processes | Network | Malware | Dashboard | DLLs     |
-|  Strings | Behavioral | Registry | Entropy | Hex | Timeline     |
+|  Strings | Behavioral | Registry | Entropy | Hex | Timeline      |
 |  Code Analysis | Report | Real-Time                              |
 +------------------------------------------------------------------+
          |                    |                        |
@@ -94,7 +94,7 @@ A professional-grade, enterprise-level memory forensics GUI tool built with Pyth
 | MemoryForensics  |  | Report         |  | Real-Time Monitor      |
 | Engine           |  | Generator      |  | (Background Thread)    |
 | (1200+ lines)    |  | (1159 lines)   |  |                        |
-|                  |  |                |  | tasklist / netstat /    |
+|                  |  |                |  | tasklist / netstat /   |
 | - Process scan   |  | - HTML output  |  | wmic subprocess calls  |
 | - Network extract|  | - 13 sections  |  | ML threat scoring      |
 | - Malware detect |  | - Dark theme   |  | Thread-safe UI updates |
@@ -107,9 +107,9 @@ A professional-grade, enterprise-level memory forensics GUI tool built with Pyth
          |
          v
 +------------------------------------------------------------------+
-|                   ML Detection Pipeline                           |
+|                   ML Detection Pipeline                          |
 |                                                                  |
-|  AdvancedMLDetector (Ensemble Orchestrator)                       |
+|  AdvancedMLDetector (Ensemble Orchestrator)                      |
 |  |                                                               |
 |  +-- AdvancedPEAnalyzer -----> PE headers, sections, imports     |
 |  |   (25% weight)                                                |
@@ -120,7 +120,7 @@ A professional-grade, enterprise-level memory forensics GUI tool built with Pyth
 |  +-- NGramAnalyzer ----------> byte sequence frequency           |
 |  |   (15% weight)              malicious pattern detection       |
 |  |                                                               |
-|  +-- ObfuscationDetector ----> entropy, XOR, Base64, packers    |
+|  +-- ObfuscationDetector ----> entropy, XOR, Base64, packers     |
 |      (15% weight)                                                |
 |                                                                  |
 |  MLMalwareDetector (Feature-Based Scoring)                       |
@@ -128,7 +128,7 @@ A professional-grade, enterprise-level memory forensics GUI tool built with Pyth
 |  +-- entropy_anomaly (15%) --+                                   |
 |  +-- api_pattern_score (25%) |                                   |
 |  +-- string_ioc_score (20%)  +-> Ensemble Score -> Validation    |
-|  +-- byte_distribution (10%) |   (threshold: 45)  (5 checks)    |
+|  +-- byte_distribution (10%) |   (threshold: 45)  (5 checks)     |
 |  +-- structural_anomaly (15%)|                                   |
 |  +-- behavioral_corr (15%) --+                                   |
 +------------------------------------------------------------------+
