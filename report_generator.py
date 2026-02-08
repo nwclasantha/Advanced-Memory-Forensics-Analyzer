@@ -789,7 +789,7 @@ body {{
             </div>
             <div class="meta-item">
                 <div class="meta-label">File Size</div>
-                <div class="meta-value">{engine.dump_size:,} bytes ({engine.dump_size/1024/1024:.2f} MB)</div>
+                <div class="meta-value">{(engine.dump_size or 0):,} bytes ({(engine.dump_size or 0)/1024/1024:.2f} MB)</div>
             </div>
             <div class="meta-item">
                 <div class="meta-label">Dump Type</div>
@@ -1087,7 +1087,7 @@ body {{
             <td class="mono">{esc(e['offset'])}</td>
             <td class="mono" style="color:{'#fca5a5' if e['entropy']>7.0 else '#6ee7b7' if e['entropy']<3.0 else 'var(--text-secondary)'}">{e['entropy']:.4f}</td>
             <td><div class="entropy-bar-container">
-                <div class="entropy-bar-bg"><div class="entropy-bar-fg" style="width:{e['entropy']/8*100:.0f}%;background:{'#ef4444' if e['entropy']>7.0 else '#f59e0b' if e['entropy']>5.0 else '#10b981'}"></div></div>
+                <div class="entropy-bar-bg"><div class="entropy-bar-fg" style="width:{min(100, e['entropy']/8*100):.0f}%;background:{'#ef4444' if e['entropy']>7.0 else '#f59e0b' if e['entropy']>5.0 else '#10b981'}"></div></div>
             </div></td>
             <td><span class="badge {'badge-critical' if e['entropy']>7.0 else 'badge-medium' if e['entropy']>5.0 else 'badge-low'}">{esc(e['classification'])}</span></td>
         </tr>''' for e in (high_entropy[:50] if high_entropy else entropy[:30]))}

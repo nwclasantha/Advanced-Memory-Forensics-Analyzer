@@ -26,6 +26,7 @@ def generate_test_dump():
     struct.pack_into('<H', pe, 132, 0x8664)   # Machine: AMD64
     struct.pack_into('<H', pe, 134, 2)        # NumberOfSections = 2
     struct.pack_into('<I', pe, 136, 0)        # TimeDateStamp = 0 (anomaly)
+    struct.pack_into('<H', pe, 148, 112)     # SizeOfOptionalHeader (PE32+)
     struct.pack_into('<H', pe, 150, 0x0022)   # Characteristics
     # Optional header at 152
     struct.pack_into('<H', pe, 152, 0x20b)    # Magic: PE32+ (64-bit)

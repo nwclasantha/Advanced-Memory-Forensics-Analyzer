@@ -132,6 +132,7 @@ class AdvancedPEAnalyzer:
             machine = struct.unpack('<H', data[coff_offset:coff_offset+2])[0]
             num_sections = struct.unpack('<H', data[coff_offset+2:coff_offset+4])[0]
             timestamp = struct.unpack('<I', data[coff_offset+4:coff_offset+8])[0]
+            size_of_opt_header = struct.unpack('<H', data[coff_offset+16:coff_offset+18])[0]
             characteristics = struct.unpack('<H', data[coff_offset+18:coff_offset+20])[0]
 
             # Check for anomalies
@@ -161,8 +162,8 @@ class AdvancedPEAnalyzer:
                     return results
                 entry_point = struct.unpack('<I', data[opt_offset+16:opt_offset+20])[0]
 
-            # Parse sections
-            section_offset = opt_offset + (112 if is_64bit else 96)
+            # Parse sections — use SizeOfOptionalHeader from COFF header for correct offset
+            section_offset = opt_offset + size_of_opt_header
             for i in range(min(num_sections, 20)):
                 sec_start = section_offset + (i * 40)
                 if sec_start + 40 > len(data):
@@ -397,7 +398,7 @@ class YARALikeEngine:
                     'matched_strings': matched_strings,
                     'offset': first_offset if first_offset >= 0 else 0,
                     'total_matches': total_matches,
-                    'confidence': min(99.5, (total_matches / len(rule['strings'])) * 100),
+                    'confidence': min(99.5, (total_matches / max(1, len(rule['strings']))) * 100),
                 })
 
         return results
@@ -522,10 +523,11 @@ class ExternalYARALoader:
         cond = re.sub(r'filesize\s*[<>=!]+\s*\d+\w*\s*(and|or)?', '', cond)
         # Remove occurrence count checks (#var > N)
         cond = re.sub(r'#\w+\s*[<>=!]+\s*\d+\s*(and|or)?', '', cond)
-        # Clean up dangling operators and whitespace
-        cond = re.sub(r'^\s*(and|or)\s+', '', cond.strip())
-        cond = re.sub(r'\s+(and|or)\s*$', '', cond.strip())
-        cond = re.sub(r'\(\s*\)', '', cond)
+        # Clean up dangling operators, empty parens, and whitespace (loop until stable)
+        for _ in range(3):
+            cond = re.sub(r'\(\s*\)', '', cond)
+            cond = re.sub(r'^\s*(and|or)\s+', '', cond.strip())
+            cond = re.sub(r'\s+(and|or)\s*$', '', cond.strip())
         return cond.strip()
 
     def _build_pattern_index(self):
@@ -662,6 +664,8 @@ class ExternalYARALoader:
         if m:
             prefix = m.group(1)
             prefixed = [v for v in all_vars if v.startswith(prefix)]
+            if not prefixed:
+                return False  # No vars with this prefix exist — cannot satisfy "all of"
             return all(v in matched_vars for v in prefixed)
 
         # "any of ($var1, $var2, ...)"
@@ -936,10 +940,9 @@ class AdvancedMLDetector:
         # Weights for ensemble scoring
         self.weights = {
             'pe_analysis': 0.25,
-            'yara_rules': 0.35,
-            'ngram_analysis': 0.15,
+            'yara_rules': 0.40,
+            'ngram_analysis': 0.20,
             'obfuscation': 0.15,
-            'behavioral': 0.10,
         }
 
     def detect(self, data):
@@ -1109,11 +1112,10 @@ class MLMalwareDetector:
     # Weighted feature importance scores (trained on malware samples)
     FEATURE_WEIGHTS = {
         'entropy_anomaly': 0.15,
-        'api_pattern_score': 0.25,
-        'string_ioc_score': 0.20,
+        'api_pattern_score': 0.30,
+        'string_ioc_score': 0.25,
         'byte_distribution_anomaly': 0.10,
-        'structural_anomaly': 0.15,
-        'behavioral_correlation': 0.15,
+        'structural_anomaly': 0.20,
     }
 
     # High-confidence malware API combinations (require multiple matches)
@@ -1273,8 +1275,8 @@ class MLMalwareDetector:
 
         # Calculate chi-square statistic for uniform distribution
         expected = length / 256
-        chi_square = sum((count - expected) ** 2 / expected
-                        for count in byte_counts.values())
+        chi_square = sum((byte_counts.get(b, 0) - expected) ** 2 / expected
+                        for b in range(256))
 
         # Normalize chi-square to 0-1 scale
         # High chi-square means non-uniform distribution (could be encrypted/packed)
@@ -1661,6 +1663,11 @@ class MemoryForensicsEngine:
         self.dump_size = os.path.getsize(filepath)
         with open(filepath, 'rb') as f:
             self.dump_data = f.read()
+        # Reset analysis state to prevent stale data from previous dump
+        self.analysis_results = {}
+        self.risk_score = 0
+        self.findings = []
+        self.info_findings = []
         return self.dump_size
 
     def get_file_hashes(self):
@@ -2502,6 +2509,7 @@ class MemoryForensicsEngine:
         if not self.dump_data:
             return ""
 
+        offset = max(0, offset)
         end = min(offset + length, len(self.dump_data))
         data = self.dump_data[offset:end]
 
@@ -2912,6 +2920,8 @@ class MemoryForensicsGUI:
                           self.COLORS['accent_blue']).pack(side='left', padx=4)
         self._create_button(btn_frame, "💾 Create Dump", self.create_memory_dump,
                           self.COLORS['accent_orange']).pack(side='left', padx=4)
+        self._create_button(btn_frame, "⚡ Acquire RAM", self.acquire_ram_dump,
+                          '#f59e0b').pack(side='left', padx=4)
         self._create_button(btn_frame, "🔍 Full Analysis", self.run_full_analysis,
                           self.COLORS['accent_green']).pack(side='left', padx=4)
         self._create_button(btn_frame, "📊 Export Report", self.export_report,
@@ -4245,6 +4255,8 @@ class MemoryForensicsGUI:
         self.new_process_count = 0
         self.suspicious_count = 0
         self.realtime_start_time = time.time()
+        self._process_metrics = {}  # {pid: (cpu_pct, mem_mb)}
+        self._prev_cpu_times = {}   # {pid: total_cpu_seconds} for CPU% delta calc
 
         # Initialize YARA external rules loader
         self.yara_loader = None
@@ -4457,6 +4469,8 @@ class MemoryForensicsGUI:
         self._add_realtime_alert("INFO", "Real-time monitoring started")
 
         # Initialize baseline
+        self._process_metrics = {}
+        self._prev_cpu_times = {}
         self.previous_processes = self._get_current_processes()
         self.previous_connections = self._get_current_connections()
         self.new_process_count = 0
@@ -4585,8 +4599,11 @@ class MemoryForensicsGUI:
                 terminated_procs = self.previous_processes - current_processes
                 new_conns = current_connections - self.previous_connections
 
+                # Snapshot metrics before scheduling UI update to avoid race condition
+                metrics_snapshot = dict(self._process_metrics)
+
                 # Schedule UI updates on main thread safely (default args capture by value)
-                self._safe_after(lambda cp=current_processes: self._update_process_display(cp))
+                self._safe_after(lambda cp=current_processes, ms=metrics_snapshot: self._update_process_display(cp, ms))
                 self._safe_after(lambda cc=current_connections: self._update_network_display(cc))
 
                 # Check for suspicious activity with 4-layer hybrid ML pipeline
@@ -4683,23 +4700,67 @@ class MemoryForensicsGUI:
                 time.sleep(self.realtime_interval)
 
     def _get_current_processes(self):
-        """Get current running processes."""
+        """Get current running processes with CPU and memory metrics."""
         processes = set()
+        current_cpu_times = {}
+        self._process_metrics = {}  # Reset each cycle to avoid stale entries
         try:
+            # Use basic tasklist CSV — fast and includes Memory in column 4
+            # Columns: "Image Name","PID","Session Name","Session#","Mem Usage"
             result = subprocess.run(['tasklist', '/FO', 'CSV', '/NH'],
                 capture_output=True, text=True, timeout=10, creationflags=subprocess.CREATE_NO_WINDOW)
-            for line in result.stdout.strip().split('\n'):
-                if line:
-                    parts = line.replace('"', '').split(',')
-                    if len(parts) >= 2:
-                        name = parts[0]
-                        pid = parts[1]
-                        try:
-                            processes.add((int(pid), name))
-                        except:
-                            pass
-        except:
+            reader = csv.reader(result.stdout.strip().split('\n'))
+            for parts in reader:
+                if len(parts) >= 5:
+                    name = parts[0]
+                    pid_str = parts[1]
+                    mem_str = parts[4].strip()
+                    try:
+                        pid = int(pid_str)
+                        processes.add((pid, name))
+
+                        # Parse memory: "123,456 K" -> MB
+                        mem_kb = int(mem_str.replace(',', '').replace(' K', '').replace('K', '').strip())
+                        mem_mb = mem_kb / 1024
+                        self._process_metrics[pid] = (0.0, mem_mb)
+                    except (ValueError, IndexError):
+                        pass
+        except Exception:
             pass
+
+        # Try to get CPU times via tasklist /V in the background for delta calculation
+        # Only attempt if not too many processes (avoid slow domain lookups)
+        try:
+            result = subprocess.run(['tasklist', '/V', '/FO', 'CSV', '/NH'],
+                capture_output=True, text=True, timeout=10, creationflags=subprocess.CREATE_NO_WINDOW)
+            reader = csv.reader(result.stdout.strip().split('\n'))
+            for parts in reader:
+                # Columns: Image Name, PID, Session Name, Session#, Mem Usage, Status, User Name, CPU Time, Window Title
+                if len(parts) >= 8:
+                    pid_str = parts[1]
+                    cpu_time_str = parts[7].strip()
+                    try:
+                        pid = int(pid_str)
+                        # Parse CPU time: "H:MM:SS" -> total seconds
+                        time_parts = cpu_time_str.split(':')
+                        if len(time_parts) == 3:
+                            cpu_seconds = int(time_parts[0]) * 3600 + int(time_parts[1]) * 60 + int(time_parts[2])
+                            current_cpu_times[pid] = cpu_seconds
+
+                            # Compute CPU% from delta between cycles
+                            if pid in self._prev_cpu_times and pid in self._process_metrics:
+                                delta_cpu = cpu_seconds - self._prev_cpu_times[pid]
+                                if delta_cpu > 0 and self.realtime_interval > 0:
+                                    cpu_pct = min((delta_cpu / self.realtime_interval) * 100, 100.0)
+                                    _, mem_mb = self._process_metrics[pid]
+                                    self._process_metrics[pid] = (cpu_pct, mem_mb)
+                    except (ValueError, IndexError):
+                        pass
+        except Exception:
+            pass  # CPU% stays at 0.0 if /V fails — memory still works
+
+        # Store CPU times for next cycle's delta calculation
+        self._prev_cpu_times = current_cpu_times
         return processes
 
     def _get_current_connections(self):
@@ -4710,17 +4771,25 @@ class MemoryForensicsGUI:
                 capture_output=True, text=True, timeout=10, creationflags=subprocess.CREATE_NO_WINDOW)
             for line in result.stdout.split('\n')[4:]:
                 parts = line.split()
-                if len(parts) >= 5:
+                if len(parts) >= 4:
                     proto = parts[0]
-                    local = parts[1]
-                    remote = parts[2]
-                    state = parts[3] if proto == 'TCP' else 'N/A'
-                    pid = parts[-1]
+                    if proto in ('TCP', 'TCPv6') and len(parts) >= 5:
+                        local = parts[1]
+                        remote = parts[2]
+                        state = parts[3]
+                        pid = parts[4]
+                    elif proto in ('UDP', 'UDPv6') and len(parts) >= 4:
+                        local = parts[1]
+                        remote = parts[2]
+                        state = 'N/A'
+                        pid = parts[3]
+                    else:
+                        continue
                     try:
                         connections.add((proto, local, remote, state, int(pid)))
-                    except:
+                    except (ValueError, TypeError):
                         pass
-        except:
+        except Exception:
             pass
         return connections
 
@@ -4906,12 +4975,23 @@ class MemoryForensicsGUI:
         reasons = []
 
         try:
-            parts = remote_addr.rsplit(':', 1)
-            if len(parts) != 2:
-                return False, "", 0
+            # Handle IPv6 bracket notation: [::1]:port, [2001:db8::1]:443
+            if remote_addr.startswith('['):
+                bracket_end = remote_addr.find(']')
+                if bracket_end < 0:
+                    return False, "", 0
+                ip_part = remote_addr[1:bracket_end]
+                port = remote_addr[bracket_end+2:] if bracket_end+2 < len(remote_addr) else '0'
+            else:
+                parts = remote_addr.rsplit(':', 1)
+                if len(parts) != 2:
+                    return False, "", 0
+                ip_part = parts[0]
+                port = parts[1]
 
-            ip_part = parts[0]
-            port = parts[1]
+            # Skip IPv6 loopback and link-local
+            if ip_part in ('::1', '::0', '0:0:0:0:0:0:0:1', '0:0:0:0:0:0:0:0') or ip_part.startswith('fe80'):
+                return False, "", 0
 
             # ═══════════════════════════════════════════════════════════════
             # LAYER 1: Known Malicious Ports
@@ -4971,7 +5051,7 @@ class MemoryForensicsGUI:
             # LAYER 3: Known Bad IP Ranges (Examples)
             # ═══════════════════════════════════════════════════════════════
             # Tor exit nodes, known C2 ranges, etc.
-            if ip_part.startswith('10.') or ip_part.startswith('192.168.') or ip_part.startswith('172.'):
+            if self.engine._is_private_ip(ip_part):
                 # Internal IPs are generally OK
                 pass
             else:
@@ -5016,13 +5096,17 @@ class MemoryForensicsGUI:
 
             lines = [l for l in result.stdout.strip().split('\n') if l.strip() and not l.startswith('Node')]
             if lines:
-                parts = lines[0].split(',')
-                if len(parts) >= 4:
-                    details['command_line'] = parts[1] if len(parts) > 1 else ''
-                    details['handles'] = int(parts[2]) if parts[2].isdigit() else 0
-                    details['parent_pid'] = int(parts[3]) if parts[3].isdigit() else 0
-                    details['threads'] = int(parts[4]) if len(parts) > 4 and parts[4].isdigit() else 0
-        except:
+                # Use csv.reader to handle quoted fields (command lines with commas)
+                parsed = list(csv.reader([lines[0]]))
+                if parsed:
+                    parts = parsed[0]
+                    if len(parts) >= 4:
+                        # WMIC CSV columns (alphabetical): Node, CommandLine, HandleCount, ParentProcessId, ThreadCount
+                        details['command_line'] = parts[1] if len(parts) > 1 else ''
+                        details['handles'] = int(parts[2]) if len(parts) > 2 and parts[2].strip().isdigit() else 0
+                        details['parent_pid'] = int(parts[3]) if len(parts) > 3 and parts[3].strip().isdigit() else 0
+                        details['threads'] = int(parts[4]) if len(parts) > 4 and parts[4].strip().isdigit() else 0
+        except Exception:
             pass
 
         return details
@@ -5177,8 +5261,8 @@ class MemoryForensicsGUI:
         # LAYER 4: Ensemble Cross-Validation
         # ═══════════════════════════════════════════════════════════════
         ensemble_score = (
-            score_l1 * 0.35 +
-            score_l2 * 0.30 +
+            score_l1 * 0.40 +
+            score_l2 * 0.35 +
             score_l3 * 0.25
         )
 
@@ -5213,7 +5297,7 @@ class MemoryForensicsGUI:
 
         return is_suspicious, reason_str, ensemble_score, detection_details
 
-    def _update_process_display(self, processes):
+    def _update_process_display(self, processes, metrics=None):
         """Update process treeview with hybrid ML + YARA threat scoring."""
         self.realtime_proc_tree.delete(*self.realtime_proc_tree.get_children())
 
@@ -5255,8 +5339,17 @@ class MemoryForensicsGUI:
             else:
                 status = 'Normal'
 
+            # Get actual CPU% and Memory from metrics snapshot (thread-safe)
+            cpu_str = '--'
+            mem_str = '--'
+            process_metrics = metrics if metrics is not None else getattr(self, '_process_metrics', {})
+            if pid in process_metrics:
+                cpu_pct, mem_mb = process_metrics[pid]
+                cpu_str = f"{cpu_pct:.1f}" if cpu_pct > 0 else "0.0"
+                mem_str = f"{mem_mb:.1f} MB"
+
             self.realtime_proc_tree.insert('', 'end', values=(
-                pid, name, '--', '--', status
+                pid, name, cpu_str, mem_str, status
             ))
 
         self.realtime_proc_count.configure(text=f"{len(processes)} active")
@@ -5353,10 +5446,10 @@ class MemoryForensicsGUI:
         if filepath:
             try:
                 if filepath.endswith('.json'):
-                    with open(filepath, 'w') as f:
+                    with open(filepath, 'w', encoding='utf-8') as f:
                         json.dump(self.realtime_alerts, f, indent=2)
                 else:
-                    with open(filepath, 'w') as f:
+                    with open(filepath, 'w', encoding='utf-8') as f:
                         for alert in self.realtime_alerts:
                             f.write(f"[{alert['time']}] [{alert['level']}] {alert['message']}\n")
                 messagebox.showinfo("Export", f"Exported {len(self.realtime_alerts)} alerts to {filepath}")
@@ -5473,6 +5566,11 @@ class MemoryForensicsGUI:
             messagebox.showwarning("Warning", "Please load a memory dump first!")
             return
 
+        # Prevent re-entrancy if analysis is already running
+        if getattr(self, '_analysis_running', False):
+            return
+        self._analysis_running = True
+
         # Track current analysis step
         self._analysis_step = 0
 
@@ -5493,6 +5591,7 @@ class MemoryForensicsGUI:
             """Process the next analysis step on the main thread."""
             if self._analysis_step >= len(steps):
                 # All steps complete
+                self._analysis_running = False
                 self.update_status("✅ Full analysis complete!", self.COLORS['accent_green'])
                 self.set_progress(100)
                 self._update_overview_stats()
@@ -6067,6 +6166,8 @@ class MemoryForensicsGUI:
             min_len = int(self.str_min_len.get())
         except (ValueError, TypeError):
             min_len = 8
+        if min_len < 1:
+            min_len = 1
 
         strings = self.engine.extract_strings(min_length=min_len)
 
@@ -6341,6 +6442,8 @@ class MemoryForensicsGUI:
             messagebox.showwarning("Warning", "Invalid offset or length!")
             return
 
+        offset = max(0, offset)
+        length = max(1, length)
         dump = self.engine.hex_dump(offset, length)
         self.hex_text.delete('1.0', 'end')
         self.hex_text.insert('1.0', dump)
@@ -6386,6 +6489,9 @@ class MemoryForensicsGUI:
         except (ValueError, TypeError):
             messagebox.showwarning("Warning", "Invalid offset or length!")
             return
+
+        offset = max(0, offset)
+        length = max(1, length)
 
         # Get code bytes
         end = min(offset + length, len(self.engine.dump_data))
@@ -6732,7 +6838,7 @@ class MemoryForensicsGUI:
                     'value': path[:60],
                 })
                 categories['File'] += 1
-            except:
+            except Exception:
                 pass
 
         # Update statistics
@@ -6932,12 +7038,14 @@ class MemoryForensicsGUI:
         if not filepath:
             return
 
-        report = self.engine.generate_report()
-        with open(filepath, 'w', encoding='utf-8') as f:
-            json.dump(report, f, indent=2, default=str, ensure_ascii=False)
-
-        self.update_status(f"✅ Report exported to {filepath}")
-        messagebox.showinfo("Export Complete", f"Report saved to:\n{filepath}")
+        try:
+            report = self.engine.generate_report()
+            with open(filepath, 'w', encoding='utf-8') as f:
+                json.dump(report, f, indent=2, default=str, ensure_ascii=False)
+            self.update_status(f"✅ Report exported to {filepath}")
+            messagebox.showinfo("Export Complete", f"Report saved to:\n{filepath}")
+        except Exception as e:
+            messagebox.showerror("Export Error", f"Failed to export JSON:\n{e}")
 
     def export_csv(self):
         """Export network artifacts as CSV."""
@@ -6953,16 +7061,18 @@ class MemoryForensicsGUI:
         if not filepath:
             return
 
-        artifacts = self.engine.extract_network_artifacts()
-        with open(filepath, 'w', newline='', encoding='utf-8') as f:
-            writer = csv.writer(f)
-            writer.writerow(['Type', 'Value'])
-            for art_type, values in artifacts.items():
-                for val in values:
-                    writer.writerow([art_type, val])
-
-        self.update_status(f"✅ Artifacts exported to {filepath}")
-        messagebox.showinfo("Export Complete", f"CSV saved to:\n{filepath}")
+        try:
+            artifacts = self.engine.extract_network_artifacts()
+            with open(filepath, 'w', newline='', encoding='utf-8') as f:
+                writer = csv.writer(f)
+                writer.writerow(['Type', 'Value'])
+                for art_type, values in artifacts.items():
+                    for val in values:
+                        writer.writerow([art_type, val])
+            self.update_status(f"✅ Artifacts exported to {filepath}")
+            messagebox.showinfo("Export Complete", f"CSV saved to:\n{filepath}")
+        except Exception as e:
+            messagebox.showerror("Export Error", f"Failed to export CSV:\n{e}")
 
     def export_html_report(self):
         """Export enterprise-grade HTML forensic report."""
@@ -7004,7 +7114,7 @@ class MemoryForensicsGUI:
         """Check if running with Administrator privileges."""
         try:
             return ctypes.windll.shell32.IsUserAnAdmin() != 0
-        except:
+        except Exception:
             return False
 
     def create_memory_dump(self):
@@ -7095,23 +7205,26 @@ class MemoryForensicsGUI:
                 network_pids = set()
                 try:
                     netstat = subprocess.run(['netstat', '-ano'],
-                                           capture_output=True, text=True, creationflags=creation_flags)
+                                           capture_output=True, text=True, timeout=15, creationflags=creation_flags)
                     for line in netstat.stdout.split('\n'):
                         if 'ESTABLISHED' in line or 'LISTENING' in line:
                             parts = line.split()
                             if parts and parts[-1].isdigit():
                                 network_pids.add(parts[-1])
-                except:
+                except Exception:
                     pass
 
                 # Get process info using WMIC for accurate memory and CPU
                 wmic_cmd = 'wmic process get ProcessId,Name,WorkingSetSize,PercentProcessorTime /FORMAT:CSV'
-                result = subprocess.run(wmic_cmd, shell=True, capture_output=True, text=True, creationflags=creation_flags)
+                result = subprocess.run(wmic_cmd, shell=True, capture_output=True, text=True, timeout=15, creationflags=creation_flags)
 
                 processes = []
                 for line in result.stdout.strip().split('\n'):
                     if line and not line.startswith('Node'):
-                        parts = [p.strip() for p in line.split(',')]
+                        parsed = list(csv.reader([line]))
+                        if not parsed:
+                            continue
+                        parts = [p.strip() for p in parsed[0]]
                         if len(parts) >= 4:
                             try:
                                 name = parts[1] if len(parts) > 1 else 'Unknown'
@@ -7122,32 +7235,31 @@ class MemoryForensicsGUI:
                                 # Parse values
                                 try:
                                     mem_mb = int(mem_bytes) / (1024 * 1024) if mem_bytes.isdigit() else 0
-                                except:
+                                except (ValueError, TypeError):
                                     mem_mb = 0
                                 try:
                                     cpu_pct = float(cpu) if cpu else 0
-                                except:
+                                except (ValueError, TypeError):
                                     cpu_pct = 0
 
                                 has_network = pid in network_pids
                                 processes.append((pid, name, mem_mb, cpu_pct, has_network))
-                            except:
+                            except Exception:
                                 continue
 
                 # Fallback to tasklist if WMIC fails
                 if not processes:
                     result = subprocess.run(['tasklist', '/FO', 'CSV', '/NH'],
-                                          capture_output=True, text=True, creationflags=creation_flags)
-                    for line in result.stdout.strip().split('\n'):
-                        if line:
-                            parts = line.replace('"', '').split(',')
-                            if len(parts) >= 5:
+                                          capture_output=True, text=True, timeout=10, creationflags=creation_flags)
+                    reader = csv.reader(result.stdout.strip().split('\n'))
+                    for parts in reader:
+                        if len(parts) >= 5:
                                 name = parts[0]
                                 pid = parts[1]
                                 mem = parts[4].replace(' K', '').replace(',', '')
                                 try:
                                     mem_mb = int(mem) / 1024
-                                except:
+                                except (ValueError, TypeError):
                                     mem_mb = 0
                                 has_network = pid in network_pids
                                 processes.append((pid, name, mem_mb, 0, has_network))
@@ -7212,6 +7324,10 @@ class MemoryForensicsGUI:
             if not filepath:
                 return
 
+            try:
+                dump_dialog.grab_release()
+            except Exception:
+                pass
             dump_dialog.destroy()
             self.update_status(f"Creating memory dump of {proc_name} (PID: {pid})...",
                              self.COLORS['accent_orange'])
@@ -7237,7 +7353,16 @@ class MemoryForensicsGUI:
                         font=('Segoe UI', 12, 'bold'), padx=30, pady=10)
         btn2.pack(side='left', padx=15)
 
-        btn3 = tk.Button(btn_frame, text="Cancel", command=dump_dialog.destroy,
+        def _close_dump_dialog():
+            try:
+                dump_dialog.grab_release()
+            except Exception:
+                pass
+            dump_dialog.destroy()
+
+        dump_dialog.protocol("WM_DELETE_WINDOW", _close_dump_dialog)
+
+        btn3 = tk.Button(btn_frame, text="Cancel", command=_close_dump_dialog,
                         bg=self.COLORS['accent_red'], fg='white',
                         font=('Segoe UI', 11, 'bold'), padx=20, pady=8)
         btn3.pack(side='left', padx=15)
@@ -7370,11 +7495,17 @@ class MemoryForensicsGUI:
                 self._update_file_info(filepath)
 
         except Exception as e:
-            # Clean up handles
-            if file_handle and file_handle != -1:
-                kernel32.CloseHandle(file_handle)
-            if process_handle:
-                kernel32.CloseHandle(process_handle)
+            # Clean up handles — use 'is not None' to avoid missing handle value 0
+            if file_handle is not None and file_handle not in (-1, 0xFFFFFFFF):
+                try:
+                    kernel32.CloseHandle(file_handle)
+                except Exception:
+                    pass
+            if process_handle is not None and process_handle != 0:
+                try:
+                    kernel32.CloseHandle(process_handle)
+                except Exception:
+                    pass
             # Fallback: try using procdump if available
             self._try_procdump_fallback(pid, filepath, proc_name, str(e))
 
@@ -7382,14 +7513,14 @@ class MemoryForensicsGUI:
         """Try using procdump.exe as fallback."""
         try:
             # Check if procdump is available
-            result = subprocess.run(['where', 'procdump'], capture_output=True, text=True)
+            result = subprocess.run(['where', 'procdump'], capture_output=True, text=True, timeout=5)
             if result.returncode != 0:
                 raise Exception(original_error)
 
             # Use procdump
             result = subprocess.run(
                 ['procdump', '-ma', str(pid), filepath, '-accepteula'],
-                capture_output=True, text=True
+                capture_output=True, text=True, timeout=120
             )
 
             if os.path.exists(filepath):
@@ -7457,6 +7588,10 @@ class MemoryForensicsGUI:
     def clear_all(self):
         """Clear all data."""
         if messagebox.askyesno("Confirm", "Clear all analysis data?"):
+            # Stop real-time monitor if running
+            if self.realtime_monitoring:
+                self.stop_realtime_monitoring()
+            self._analysis_running = False
             self.engine = MemoryForensicsEngine()
             self.file_info_text.delete('1.0', 'end')
             self.file_info_text.insert('1.0', "No file loaded.")
@@ -7479,11 +7614,652 @@ class MemoryForensicsGUI:
             for hash_type in self.hash_labels:
                 self.hash_labels[hash_type].configure(text="-" * 32, fg='#4b5563')
 
+            # Clear all treeviews (including real-time monitor trees)
+            for tree in [self.proc_tree, self.net_tree, self.malware_tree,
+                         self.dll_tree, self.str_tree, self.reg_tree,
+                         self.entropy_tree, self.timeline_tree,
+                         self.realtime_proc_tree, self.realtime_net_tree]:
+                try:
+                    tree.delete(*tree.get_children())
+                except Exception:
+                    pass
+
+            # Clear text widgets in analysis tabs
+            for widget_name in ['behavior_findings_text', 'hex_text', 'report_text',
+                               'code_analysis_text', 'behavior_info_text',
+                               'dashboard_details', 'realtime_alert_text',
+                               'disasm_text', 'ml_report_text']:
+                widget = getattr(self, widget_name, None)
+                if widget:
+                    try:
+                        widget.delete('1.0', 'end')
+                    except Exception:
+                        pass
+
+            # Reset registry and timeline stat labels
+            for key in getattr(self, 'reg_stat_labels', {}):
+                try:
+                    self.reg_stat_labels[key].configure(text="--")
+                except Exception:
+                    pass
+            for key in getattr(self, 'timeline_stat_labels', {}):
+                try:
+                    self.timeline_stat_labels[key].configure(text="--")
+                except Exception:
+                    pass
+
+            # Reset threat dashboard canvas and metric cards
+            try:
+                self.threat_canvas.delete('all')
+            except Exception:
+                pass
+            for card_name in ['threat_score_card', 'risk_level_card',
+                              'detection_count_card', 'precision_card', 'layers_card']:
+                card = getattr(self, card_name, None)
+                if card and hasattr(card, 'value_label'):
+                    try:
+                        card.value_label.configure(text="--", fg=self.COLORS['text_muted'])
+                    except Exception:
+                        pass
+
+            # Reset behavioral tab widgets
+            try:
+                self.behavior_score_label.configure(text="--", fg=self.COLORS['text_muted'])
+                self.behavior_level_label.configure(text="WAITING FOR ANALYSIS", fg=self.COLORS['text_muted'])
+            except Exception:
+                pass
+            try:
+                self.behavior_gauge.delete('all')
+                self.behavior_gauge.create_rectangle(0, 0, 240, 20, fill='#1e1e2e', outline='')
+            except Exception:
+                pass
+            # Clear MITRE ATT&CK dynamic labels
+            try:
+                for widget in self.mitre_frame.winfo_children():
+                    widget.destroy()
+                tk.Label(self.mitre_frame, text="Run analysis to see\nMITRE ATT&CK mappings",
+                        font=('Segoe UI', 9), fg=self.COLORS['text_muted'],
+                        bg=self.COLORS['bg_card'], justify='center').pack(pady=20)
+            except Exception:
+                pass
+
+            # Reset report summary cards and findings frame
+            for key in getattr(self, 'report_summary_labels', {}):
+                try:
+                    self.report_summary_labels[key].config(text="--", fg=self.COLORS['text_muted'])
+                except Exception:
+                    pass
+            try:
+                for widget in self.report_findings_frame.winfo_children():
+                    widget.destroy()
+                tk.Label(self.report_findings_frame, text="Generate report to see\nkey findings summary",
+                        font=('Segoe UI', 9), fg=self.COLORS['text_muted'],
+                        bg=self.COLORS['bg_card'], justify='center').pack(pady=30)
+            except Exception:
+                pass
+
+            # Reset timeline event types frame
+            try:
+                for widget in self.timeline_types_frame.winfo_children():
+                    widget.destroy()
+                tk.Label(self.timeline_types_frame, text="Build timeline to see\nevent categorization",
+                        font=('Segoe UI', 9), fg=self.COLORS['text_muted'],
+                        bg=self.COLORS['bg_card'], justify='center').pack(pady=30)
+            except Exception:
+                pass
+
+            # Reset real-time monitor internal state
+            self.realtime_alerts = []
+            self.previous_processes = set()
+            self.previous_connections = set()
+            self.new_process_count = 0
+            self.suspicious_count = 0
+            self._process_metrics = {}
+            self._prev_cpu_times = {}
+
+            # Reset real-time monitor UI labels
+            try:
+                self.realtime_proc_count.configure(text="0 active")
+                self.realtime_net_count.configure(text="0 connections")
+                self.realtime_alert_count.configure(text="0")
+                self.realtime_newproc_count.configure(text="0")
+                self.realtime_susp_count.configure(text="0")
+            except Exception:
+                pass
+
             # Reset risk gauge
             self._draw_risk_gauge(0)
 
             self.set_progress(0)
             self.update_status("Cleared all data", self.COLORS['text_dim'])
+
+
+    # ═══════════════════════════════════════════════════════════════
+    #  RAM ACQUISITION & VOLATILITY 3 INTEGRATION
+    # ═══════════════════════════════════════════════════════════════
+
+    def _find_external_tool(self, tool_names):
+        """Search for an external tool in common locations."""
+        search_dirs = [
+            os.path.join(os.path.dirname(os.path.abspath(__file__)), 'tools'),
+            os.path.dirname(os.path.abspath(__file__)),
+            os.path.expanduser('~\\Desktop'),
+            os.path.expanduser('~\\Downloads'),
+            'C:\\Tools',
+            'C:\\Forensics',
+            'C:\\Program Files',
+            'C:\\Program Files (x86)',
+        ]
+        for tool_name in tool_names:
+            for d in search_dirs:
+                path = os.path.join(d, tool_name)
+                if os.path.isfile(path):
+                    return path
+            # Also check PATH
+            try:
+                result = subprocess.run(['where', tool_name], capture_output=True,
+                    text=True, timeout=5, creationflags=subprocess.CREATE_NO_WINDOW)
+                if result.returncode == 0 and result.stdout.strip():
+                    return result.stdout.strip().split('\n')[0]
+            except Exception:
+                pass
+        return None
+
+    def _check_volatility3(self):
+        """Check if Volatility 3 is installed."""
+        # Check common names on PATH
+        for cmd in ['vol', 'vol3']:
+            try:
+                result = subprocess.run([cmd, '--help'], capture_output=True,
+                    text=True, timeout=10, creationflags=subprocess.CREATE_NO_WINDOW)
+                if result.returncode == 0:
+                    return cmd
+            except Exception:
+                pass
+        # Check Python user scripts directory (pip --user installs here)
+        user_scripts = os.path.join(os.path.expanduser('~'),
+            'AppData', 'Roaming', 'Python', 'Python313', 'Scripts', 'vol.exe')
+        if os.path.isfile(user_scripts):
+            try:
+                result = subprocess.run([user_scripts, '--help'], capture_output=True,
+                    text=True, timeout=10, creationflags=subprocess.CREATE_NO_WINDOW)
+                if result.returncode == 0:
+                    return user_scripts
+            except Exception:
+                pass
+        # Also check common Python3 script dirs
+        for pyver in ['Python313', 'Python312', 'Python311', 'Python310']:
+            vol_path = os.path.join(os.path.expanduser('~'),
+                'AppData', 'Roaming', 'Python', pyver, 'Scripts', 'vol.exe')
+            if os.path.isfile(vol_path):
+                return vol_path
+            # Also check system Python
+            sys_path = os.path.join(f'C:\\{pyver}', 'Scripts', 'vol.exe')
+            if os.path.isfile(sys_path):
+                return sys_path
+        return None
+
+    def acquire_ram_dump(self):
+        """Show RAM acquisition dialog with external tool integration."""
+        dialog = tk.Toplevel(self.root)
+        dialog.title("Full RAM Acquisition")
+        dialog.geometry("750x620")
+        dialog.configure(bg=self.COLORS['bg_dark'])
+        dialog.transient(self.root)
+        dialog.grab_set()
+
+        # Header
+        tk.Label(dialog, text="FULL RAM ACQUISITION",
+                font=('Consolas', 14, 'bold'),
+                fg=self.COLORS['accent_cyan'],
+                bg=self.COLORS['bg_dark']).pack(pady=(16, 4))
+        tk.Label(dialog, text="Capture full physical memory for forensic analysis",
+                font=('Consolas', 10), fg=self.COLORS['text_secondary'],
+                bg=self.COLORS['bg_dark']).pack(pady=(0, 16))
+
+        # Tool detection frame
+        tools_card = tk.Frame(dialog, bg=self.COLORS['bg_card'], padx=16, pady=12)
+        tools_card.pack(fill='x', padx=16, pady=(0, 8))
+
+        tk.Label(tools_card, text="DETECTED TOOLS",
+                font=('Consolas', 10, 'bold'), fg=self.COLORS['accent_cyan'],
+                bg=self.COLORS['bg_card']).pack(anchor='w')
+
+        # Detect tools
+        winpmem_path = self._find_external_tool([
+            'winpmem_mini_x64.exe', 'winpmem.exe', 'winpmem_mini_x86.exe'])
+        dumpit_path = self._find_external_tool(['DumpIt.exe', 'dumpit.exe'])
+        ftk_path = self._find_external_tool([
+            'FTK Imager.exe', 'FTKImager.exe',
+            os.path.join('AccessData', 'FTK Imager', 'FTK Imager.exe')])
+        vol3_cmd = self._check_volatility3()
+
+        tool_status = tk.Frame(tools_card, bg=self.COLORS['bg_card'])
+        tool_status.pack(fill='x', pady=(8, 0))
+
+        tools_detected = []
+
+        def _tool_row(parent, name, path, desc):
+            row = tk.Frame(parent, bg=self.COLORS['bg_card'])
+            row.pack(fill='x', pady=2)
+            if path:
+                icon = "✅"
+                color = '#2ed573'
+                tools_detected.append((name, path))
+            else:
+                icon = "❌"
+                color = '#ff4757'
+            tk.Label(row, text=f"{icon} {name}", font=('Consolas', 10, 'bold'),
+                    fg=color, bg=self.COLORS['bg_card'], width=22, anchor='w').pack(side='left')
+            status_text = os.path.basename(path) if path else "Not found"
+            tk.Label(row, text=status_text, font=('Consolas', 9),
+                    fg=self.COLORS['text_muted'], bg=self.COLORS['bg_card']).pack(side='left', padx=(4, 0))
+            tk.Label(row, text=desc, font=('Consolas', 8),
+                    fg='#6b7280', bg=self.COLORS['bg_card']).pack(side='right')
+
+        _tool_row(tool_status, "WinPmem", winpmem_path, "Open-source RAM capture")
+        _tool_row(tool_status, "DumpIt", dumpit_path, "Comae one-click acquisition")
+        _tool_row(tool_status, "FTK Imager", ftk_path, "AccessData forensic imager")
+        _tool_row(tool_status, "Volatility 3", vol3_cmd, "Advanced memory analysis")
+
+        # Tool selection
+        select_card = tk.Frame(dialog, bg=self.COLORS['bg_card'], padx=16, pady=12)
+        select_card.pack(fill='x', padx=16, pady=8)
+
+        tk.Label(select_card, text="SELECT ACQUISITION METHOD",
+                font=('Consolas', 10, 'bold'), fg=self.COLORS['accent_cyan'],
+                bg=self.COLORS['bg_card']).pack(anchor='w', pady=(0, 8))
+
+        selected_tool = tk.StringVar(value='')
+        tool_options = []
+        if winpmem_path:
+            tool_options.append(('winpmem', 'WinPmem — Full physical memory dump (recommended)', winpmem_path))
+        if dumpit_path:
+            tool_options.append(('dumpit', 'DumpIt — Quick one-click RAM acquisition', dumpit_path))
+        if ftk_path:
+            tool_options.append(('ftk', 'FTK Imager — Launch external application', ftk_path))
+
+        if tool_options:
+            selected_tool.set(tool_options[0][0])
+            for tool_id, label, _ in tool_options:
+                tk.Radiobutton(select_card, text=label, variable=selected_tool,
+                    value=tool_id, font=('Consolas', 10),
+                    fg=self.COLORS['text_primary'], bg=self.COLORS['bg_card'],
+                    selectcolor=self.COLORS['bg_dark'],
+                    activebackground=self.COLORS['bg_card'],
+                    activeforeground=self.COLORS['text_primary']).pack(anchor='w', pady=2)
+        else:
+            tk.Label(select_card, text="No acquisition tools found!\n\n"
+                    "Please download one of these tools and place it in the 'tools' folder:\n"
+                    "  • WinPmem: github.com/Velocidex/WinPmem/releases\n"
+                    "  • DumpIt:  magnet forensics.com/resources/magnet-dumpit",
+                    font=('Consolas', 9), fg='#ff4757',
+                    bg=self.COLORS['bg_card'], justify='left').pack(anchor='w')
+
+        # Output options
+        output_card = tk.Frame(dialog, bg=self.COLORS['bg_card'], padx=16, pady=12)
+        output_card.pack(fill='x', padx=16, pady=8)
+
+        tk.Label(output_card, text="OUTPUT SETTINGS",
+                font=('Consolas', 10, 'bold'), fg=self.COLORS['accent_cyan'],
+                bg=self.COLORS['bg_card']).pack(anchor='w', pady=(0, 8))
+
+        path_frame = tk.Frame(output_card, bg=self.COLORS['bg_card'])
+        path_frame.pack(fill='x')
+
+        tk.Label(path_frame, text="Save to:", font=('Consolas', 10),
+                fg=self.COLORS['text_secondary'], bg=self.COLORS['bg_card']).pack(side='left')
+
+        default_path = os.path.join(os.path.expanduser('~\\Desktop'),
+            f"RAM_Dump_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.raw")
+        output_path = tk.StringVar(value=default_path)
+        path_entry = tk.Entry(path_frame, textvariable=output_path,
+            font=('Consolas', 9), bg='#1e293b', fg='white',
+            insertbackground='white', width=50)
+        path_entry.pack(side='left', padx=8, fill='x', expand=True)
+
+        def browse_output():
+            f = filedialog.asksaveasfilename(parent=dialog,
+                defaultextension=".raw",
+                filetypes=[("Raw Dump", "*.raw"), ("Memory Dump", "*.dmp"), ("All Files", "*.*")],
+                title="Save RAM Dump As",
+                initialfile=os.path.basename(default_path))
+            if f:
+                output_path.set(f)
+
+        tk.Button(path_frame, text="Browse...", command=browse_output,
+                bg=self.COLORS['accent_blue'], fg='white',
+                font=('Segoe UI', 9), relief='flat', padx=10).pack(side='left')
+
+        auto_analyze = tk.BooleanVar(value=True)
+        tk.Checkbutton(output_card, text="Auto-load dump for analysis after acquisition",
+            variable=auto_analyze, font=('Consolas', 9),
+            fg=self.COLORS['text_primary'], bg=self.COLORS['bg_card'],
+            selectcolor=self.COLORS['bg_dark'],
+            activebackground=self.COLORS['bg_card']).pack(anchor='w', pady=(8, 0))
+
+        # Status/progress area
+        status_card = tk.Frame(dialog, bg=self.COLORS['bg_card'], padx=16, pady=8)
+        status_card.pack(fill='x', padx=16, pady=8)
+
+        status_label = tk.Label(status_card, text="Ready — Select a tool and click Acquire",
+            font=('Consolas', 9), fg=self.COLORS['text_muted'],
+            bg=self.COLORS['bg_card'])
+        status_label.pack(anchor='w')
+
+        progress = ttk.Progressbar(status_card, mode='indeterminate', length=400)
+        progress.pack(fill='x', pady=(4, 0))
+
+        # Volatility 3 section
+        if vol3_cmd:
+            vol_card = tk.Frame(dialog, bg=self.COLORS['bg_card'], padx=16, pady=8)
+            vol_card.pack(fill='x', padx=16, pady=(0, 8))
+            vol_frame = tk.Frame(vol_card, bg=self.COLORS['bg_card'])
+            vol_frame.pack(fill='x')
+            tk.Label(vol_frame, text="🔬 Volatility 3 detected!",
+                    font=('Consolas', 9, 'bold'), fg='#2ed573',
+                    bg=self.COLORS['bg_card']).pack(side='left')
+            tk.Button(vol_frame, text="Run Volatility Analysis",
+                command=lambda: self._volatility_analysis_dialog(vol3_cmd),
+                bg='#8b5cf6', fg='white', font=('Segoe UI', 9, 'bold'),
+                relief='flat', padx=12, pady=4).pack(side='right')
+
+        # Buttons
+        btn_frame = tk.Frame(dialog, bg='#1a2332', pady=10)
+        btn_frame.pack(side='bottom', fill='x')
+        tk.Frame(dialog, height=2, bg=self.COLORS['accent_cyan']).pack(side='bottom', fill='x', padx=16)
+
+        def do_acquire():
+            if not tool_options:
+                messagebox.showwarning("No Tools", "No acquisition tools found.\n\n"
+                    "Download WinPmem from:\ngithub.com/Velocidex/WinPmem/releases\n\n"
+                    "Place the .exe in a 'tools' folder next to this application.",
+                    parent=dialog)
+                return
+
+            if not self._is_admin():
+                messagebox.showerror("Administrator Required",
+                    "RAM acquisition requires Administrator privileges.\n\n"
+                    "Please restart this application as Administrator.",
+                    parent=dialog)
+                return
+
+            filepath = output_path.get()
+            if not filepath:
+                return
+
+            tool_id = selected_tool.get()
+            tool_path = None
+            for tid, _, tp in tool_options:
+                if tid == tool_id:
+                    tool_path = tp
+                    break
+
+            if not tool_path:
+                return
+
+            # Disable button, start progress
+            acquire_btn.configure(state='disabled')
+            progress.start(20)
+            status_label.configure(text=f"Acquiring RAM with {tool_id}... This may take several minutes.",
+                fg='#f59e0b')
+            dialog.update()
+
+            def _run_acquisition():
+                try:
+                    if tool_id == 'winpmem':
+                        cmd = [tool_path, filepath]
+                    elif tool_id == 'dumpit':
+                        cmd = [tool_path, '/OUTPUT', filepath, '/QUIET']
+                    elif tool_id == 'ftk':
+                        # FTK Imager is GUI-based, just launch it
+                        os.startfile(tool_path)
+                        self._safe_after_always(lambda: status_label.configure(
+                            text="FTK Imager launched. Create dump manually, then load it.",
+                            fg='#2ed573'))
+                        self._safe_after_always(lambda: progress.stop())
+                        self._safe_after_always(lambda: acquire_btn.configure(state='normal'))
+                        return
+
+                    result = subprocess.run(cmd, capture_output=True, text=True,
+                        timeout=600, creationflags=subprocess.CREATE_NO_WINDOW)
+
+                    if os.path.exists(filepath) and os.path.getsize(filepath) > 0:
+                        size_mb = os.path.getsize(filepath) / (1024 * 1024)
+                        self._safe_after_always(lambda: progress.stop())
+                        self._safe_after_always(lambda: status_label.configure(
+                            text=f"SUCCESS! Dump saved: {size_mb:.0f} MB",
+                            fg='#2ed573'))
+                        self._safe_after_always(lambda: acquire_btn.configure(state='normal'))
+
+                        if auto_analyze.get():
+                            def _load():
+                                try:
+                                    dialog.grab_release()
+                                except Exception:
+                                    pass
+                                dialog.destroy()
+                                self.engine.load_dump(filepath)
+                                self._update_file_info(filepath)
+                                self.update_status(
+                                    f"RAM dump loaded: {size_mb:.0f} MB",
+                                    self.COLORS['accent_green'])
+                            self._safe_after_always(_load)
+                    else:
+                        err = result.stderr or result.stdout or "Unknown error"
+                        self._safe_after_always(lambda: progress.stop())
+                        self._safe_after_always(lambda e=err: status_label.configure(
+                            text=f"FAILED: {e[:100]}", fg='#ff4757'))
+                        self._safe_after_always(lambda: acquire_btn.configure(state='normal'))
+
+                except subprocess.TimeoutExpired:
+                    self._safe_after_always(lambda: progress.stop())
+                    self._safe_after_always(lambda: status_label.configure(
+                        text="Acquisition timed out (10 min limit)", fg='#ff4757'))
+                    self._safe_after_always(lambda: acquire_btn.configure(state='normal'))
+                except Exception as e:
+                    self._safe_after_always(lambda: progress.stop())
+                    self._safe_after_always(lambda err=str(e): status_label.configure(
+                        text=f"Error: {err[:100]}", fg='#ff4757'))
+                    self._safe_after_always(lambda: acquire_btn.configure(state='normal'))
+
+            threading.Thread(target=_run_acquisition, daemon=True).start()
+
+        acquire_btn = tk.Button(btn_frame, text=">>> ACQUIRE RAM <<<", command=do_acquire,
+            bg='#f59e0b', fg='white', font=('Segoe UI', 12, 'bold'),
+            padx=30, pady=10, relief='flat', cursor='hand2')
+        acquire_btn.pack(side='left', padx=15)
+
+        def open_tools_folder():
+            tools_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'tools')
+            os.makedirs(tools_dir, exist_ok=True)
+            os.startfile(tools_dir)
+
+        tk.Button(btn_frame, text="Open Tools Folder", command=open_tools_folder,
+            bg=self.COLORS['accent_blue'], fg='white',
+            font=('Segoe UI', 11, 'bold'), padx=20, pady=8, relief='flat').pack(side='left', padx=8)
+
+        def _close_dialog():
+            try:
+                dialog.grab_release()
+            except Exception:
+                pass
+            dialog.destroy()
+
+        dialog.protocol("WM_DELETE_WINDOW", _close_dialog)
+
+        tk.Button(btn_frame, text="Cancel", command=_close_dialog,
+            bg=self.COLORS['accent_red'], fg='white',
+            font=('Segoe UI', 11, 'bold'), padx=20, pady=8, relief='flat').pack(side='left', padx=8)
+
+    def _volatility_analysis_dialog(self, vol3_cmd):
+        """Run Volatility 3 plugins on the currently loaded dump."""
+        if not self.engine.dump_path:
+            messagebox.showwarning("No Dump", "Please load a memory dump first!")
+            return
+
+        dialog = tk.Toplevel(self.root)
+        dialog.title("Volatility 3 Analysis")
+        dialog.geometry("900x700")
+        dialog.configure(bg=self.COLORS['bg_dark'])
+        dialog.transient(self.root)
+
+        # Header
+        tk.Label(dialog, text="VOLATILITY 3 ANALYSIS",
+                font=('Consolas', 14, 'bold'), fg='#8b5cf6',
+                bg=self.COLORS['bg_dark']).pack(pady=(16, 4))
+        tk.Label(dialog, text=f"Dump: {os.path.basename(self.engine.dump_path or 'N/A')}",
+                font=('Consolas', 10), fg=self.COLORS['text_secondary'],
+                bg=self.COLORS['bg_dark']).pack(pady=(0, 12))
+
+        # Plugin selection
+        plugin_frame = tk.Frame(dialog, bg=self.COLORS['bg_card'], padx=16, pady=12)
+        plugin_frame.pack(fill='x', padx=16, pady=(0, 8))
+
+        tk.Label(plugin_frame, text="SELECT PLUGIN",
+                font=('Consolas', 10, 'bold'), fg=self.COLORS['accent_cyan'],
+                bg=self.COLORS['bg_card']).pack(anchor='w', pady=(0, 8))
+
+        plugins = [
+            ('windows.pslist', 'Process List — List running processes'),
+            ('windows.pstree', 'Process Tree — Hierarchical process view'),
+            ('windows.netscan', 'Network Scan — Active network connections'),
+            ('windows.malfind', 'Malware Find — Detect injected/hidden code'),
+            ('windows.dlllist', 'DLL List — Loaded DLLs per process'),
+            ('windows.handles', 'Handles — Open handles per process'),
+            ('windows.cmdline', 'Command Lines — Process command arguments'),
+            ('windows.filescan', 'File Scan — Scan for file objects'),
+            ('windows.registry.hivelist', 'Registry Hives — List registry hives'),
+            ('windows.vadinfo', 'VAD Info — Virtual Address Descriptors'),
+            ('windows.ssdt', 'SSDT — System Service Descriptor Table'),
+            ('windows.driverscan', 'Driver Scan — Loaded kernel drivers'),
+        ]
+
+        plugin_listbox = tk.Listbox(plugin_frame, height=8,
+            font=('Consolas', 10), bg='#1e293b', fg='white',
+            selectbackground=self.COLORS['accent_blue'],
+            selectforeground='white', relief='flat', bd=0)
+        plugin_listbox.pack(fill='x')
+        for pid, desc in plugins:
+            plugin_listbox.insert('end', f"  {pid:35s} {desc}")
+        plugin_listbox.selection_set(0)
+
+        # Results area
+        result_frame = tk.Frame(dialog, bg=self.COLORS['bg_card'], padx=16, pady=8)
+        result_frame.pack(fill='both', expand=True, padx=16, pady=8)
+
+        tk.Label(result_frame, text="RESULTS",
+                font=('Consolas', 10, 'bold'), fg=self.COLORS['accent_cyan'],
+                bg=self.COLORS['bg_card']).pack(anchor='w')
+
+        result_text = scrolledtext.ScrolledText(result_frame,
+            font=('Consolas', 9), bg='#0f172a', fg='#e2e8f0',
+            insertbackground='white', relief='flat', height=20, wrap='none')
+        result_text.pack(fill='both', expand=True, pady=(4, 0))
+        result_text.insert('1.0', "Select a plugin and click 'Run Plugin' to begin analysis.\n\n"
+            "Note: Some plugins may take several minutes on large dumps.")
+
+        status_label = tk.Label(result_frame, text="Ready",
+            font=('Consolas', 9), fg=self.COLORS['text_muted'],
+            bg=self.COLORS['bg_card'])
+        status_label.pack(anchor='w', pady=(4, 0))
+
+        # Buttons
+        btn_frame = tk.Frame(dialog, bg='#1a2332', pady=10)
+        btn_frame.pack(side='bottom', fill='x')
+        tk.Frame(dialog, height=2, bg='#8b5cf6').pack(side='bottom', fill='x', padx=16)
+
+        def run_plugin():
+            selection = plugin_listbox.curselection()
+            if not selection:
+                return
+            plugin_name = plugins[selection[0]][0]
+
+            result_text.delete('1.0', 'end')
+            result_text.insert('1.0', f"Running {plugin_name}...\nThis may take a while.\n")
+            status_label.configure(text=f"Running: {plugin_name}...", fg='#f59e0b')
+            run_btn.configure(state='disabled')
+            dialog.update()
+
+            def _execute():
+                try:
+                    # Build command
+                    if vol3_cmd.startswith('python'):
+                        cmd_parts = vol3_cmd.split() + ['-f', self.engine.dump_path, plugin_name]
+                    else:
+                        cmd_parts = [vol3_cmd, '-f', self.engine.dump_path, plugin_name]
+
+                    result = subprocess.run(cmd_parts, capture_output=True, text=True,
+                        timeout=300, creationflags=subprocess.CREATE_NO_WINDOW)
+
+                    output = result.stdout or result.stderr or "No output returned."
+
+                    def _update():
+                        try:
+                            if not dialog.winfo_exists():
+                                return
+                            result_text.delete('1.0', 'end')
+                            result_text.insert('1.0', f"=== {plugin_name} ===\n\n{output}")
+                            status_label.configure(text=f"Completed: {plugin_name}", fg='#2ed573')
+                            run_btn.configure(state='normal')
+                        except tk.TclError:
+                            pass  # Dialog was closed by user
+
+                    self._safe_after_always(_update)
+
+                except subprocess.TimeoutExpired:
+                    def _timeout():
+                        try:
+                            if not dialog.winfo_exists():
+                                return
+                            result_text.insert('end', "\n\nTIMEOUT: Plugin took too long (5 min limit).")
+                            status_label.configure(text="Timed out", fg='#ff4757')
+                            run_btn.configure(state='normal')
+                        except tk.TclError:
+                            pass
+                    self._safe_after_always(_timeout)
+                except Exception as e:
+                    def _error(err=str(e)):
+                        try:
+                            if not dialog.winfo_exists():
+                                return
+                            result_text.insert('end', f"\n\nERROR: {err}")
+                            status_label.configure(text="Error", fg='#ff4757')
+                            run_btn.configure(state='normal')
+                        except tk.TclError:
+                            pass
+                    self._safe_after_always(_error)
+
+            threading.Thread(target=_execute, daemon=True).start()
+
+        def export_results():
+            content = result_text.get('1.0', 'end').strip()
+            if not content or content.startswith("Select a plugin"):
+                return
+            filepath = filedialog.asksaveasfilename(parent=dialog,
+                defaultextension=".txt",
+                filetypes=[("Text File", "*.txt"), ("All Files", "*.*")],
+                title="Export Volatility Results")
+            if filepath:
+                try:
+                    with open(filepath, 'w', encoding='utf-8') as f:
+                        f.write(content)
+                    status_label.configure(text=f"Exported to {os.path.basename(filepath)}", fg='#2ed573')
+                except Exception as e:
+                    status_label.configure(text=f"Export failed: {e}", fg='#ff4757')
+
+        run_btn = tk.Button(btn_frame, text=">>> Run Plugin <<<", command=run_plugin,
+            bg='#8b5cf6', fg='white', font=('Segoe UI', 12, 'bold'),
+            padx=30, pady=10, relief='flat', cursor='hand2')
+        run_btn.pack(side='left', padx=15)
+
+        tk.Button(btn_frame, text="Export Results", command=export_results,
+            bg=self.COLORS['accent_blue'], fg='white',
+            font=('Segoe UI', 11, 'bold'), padx=20, pady=8, relief='flat').pack(side='left', padx=8)
+
+        tk.Button(btn_frame, text="Close", command=dialog.destroy,
+            bg=self.COLORS['accent_red'], fg='white',
+            font=('Segoe UI', 11, 'bold'), padx=20, pady=8, relief='flat').pack(side='left', padx=8)
 
 
 # ═══════════════════════════════════════════════════════════════

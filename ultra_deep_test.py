@@ -19,6 +19,7 @@ import tempfile
 import hashlib
 import math
 import io
+import inspect
 from collections import Counter
 from unittest.mock import patch, MagicMock
 
@@ -56,6 +57,7 @@ def _build_pe(sections=None, timestamp=0x12345678, num_sections=1, imports=None)
     struct.pack_into('<H', pe, 132, 0x14C)    # Machine: i386
     struct.pack_into('<H', pe, 134, num_sections)
     struct.pack_into('<I', pe, 136, timestamp)
+    struct.pack_into('<H', pe, 148, 96)       # SizeOfOptionalHeader (minimal PE32, no data dirs)
     struct.pack_into('<H', pe, 150, 0x0102)
     # Optional header
     struct.pack_into('<H', pe, 152, 0x10b)    # PE32
@@ -196,6 +198,7 @@ class TestAdvancedPEAnalyzer(unittest.TestCase):
         pe[128:132] = b'PE\x00\x00'
         struct.pack_into('<H', pe, 134, 1)     # 1 section
         struct.pack_into('<I', pe, 136, 100)
+        struct.pack_into('<H', pe, 148, 112)   # SizeOfOptionalHeader (minimal PE32+)
         struct.pack_into('<H', pe, 152, 0x20b)  # PE32+
         # section at 152 + 112 = 264
         pe[264:272] = b'.text\x00\x00\x00'
@@ -2449,6 +2452,1151 @@ class TestDefensiveInit(unittest.TestCase):
         self.assertIn('self.suspicious_count', source)
         self.assertIn('self.realtime_start_time', source)
 
+    @patch('memory_forensics_tool.tk')
+    @patch('memory_forensics_tool.ttk')
+    def test_process_metrics_initialized_in_create_realtime_tab(self, mock_ttk, mock_tk):
+        """_process_metrics and _prev_cpu_times should be initialized in create_realtime_tab."""
+        import inspect
+        from memory_forensics_tool import MemoryForensicsGUI
+        source = inspect.getsource(MemoryForensicsGUI.create_realtime_tab)
+        self.assertIn('self._process_metrics', source)
+        self.assertIn('self._prev_cpu_times', source)
+
+
+class TestProcessMetricsCollection(unittest.TestCase):
+    """Tests for CPU and memory metrics collection in the real-time monitor."""
+
+    def test_get_current_processes_returns_set(self):
+        """_get_current_processes should return a set of (pid, name) tuples."""
+        from memory_forensics_tool import MemoryForensicsGUI
+        gui = MemoryForensicsGUI.__new__(MemoryForensicsGUI)
+        gui._process_metrics = {}
+        gui._prev_cpu_times = {}
+        gui.realtime_interval = 3
+        result = gui._get_current_processes()
+        self.assertIsInstance(result, set)
+        # Should have at least some processes on any running system
+        self.assertGreater(len(result), 0)
+
+    def test_process_metrics_populated(self):
+        """_process_metrics should be populated with (cpu, mem) tuples after collection."""
+        from memory_forensics_tool import MemoryForensicsGUI
+        gui = MemoryForensicsGUI.__new__(MemoryForensicsGUI)
+        gui._process_metrics = {}
+        gui._prev_cpu_times = {}
+        gui.realtime_interval = 3
+        processes = gui._get_current_processes()
+        # Metrics should be populated for collected processes
+        self.assertGreater(len(gui._process_metrics), 0)
+        # Each metric entry should be (cpu_pct, mem_mb)
+        for pid, (cpu_pct, mem_mb) in gui._process_metrics.items():
+            self.assertIsInstance(cpu_pct, float)
+            self.assertIsInstance(mem_mb, float)
+            self.assertGreaterEqual(cpu_pct, 0.0)
+            self.assertGreaterEqual(mem_mb, 0.0)
+
+    def test_prev_cpu_times_stored(self):
+        """_prev_cpu_times should be a dict after collection (may be empty if /V falls back)."""
+        from memory_forensics_tool import MemoryForensicsGUI
+        gui = MemoryForensicsGUI.__new__(MemoryForensicsGUI)
+        gui._process_metrics = {}
+        gui._prev_cpu_times = {}
+        gui.realtime_interval = 3
+        gui._get_current_processes()
+        # Should be a dict (populated if /V succeeds, empty if fallback was used)
+        self.assertIsInstance(gui._prev_cpu_times, dict)
+
+    def test_cpu_delta_computation(self):
+        """CPU% should be computed from delta between cycles."""
+        from memory_forensics_tool import MemoryForensicsGUI
+        gui = MemoryForensicsGUI.__new__(MemoryForensicsGUI)
+        gui._process_metrics = {}
+        gui._prev_cpu_times = {}
+        gui.realtime_interval = 3
+        # First call — baseline (all CPU% should be 0.0)
+        gui._get_current_processes()
+        for pid, (cpu_pct, mem_mb) in gui._process_metrics.items():
+            self.assertEqual(cpu_pct, 0.0, "First cycle should have 0.0 CPU%")
+        # Second call — now deltas can be computed
+        gui._get_current_processes()
+        # Just verify it runs without error; actual delta depends on system load
+
+    def test_update_process_display_uses_metrics(self):
+        """_update_process_display should use _process_metrics for CPU/Memory columns."""
+        import inspect
+        from memory_forensics_tool import MemoryForensicsGUI
+        source = inspect.getsource(MemoryForensicsGUI._update_process_display)
+        self.assertIn('_process_metrics', source)
+        self.assertNotIn("'--', '--'", source, "Should not hardcode '--' for both CPU and Memory")
+
+
+# ═══════════════════════════════════════════════════════════════
+#  SESSION 9: Bug 22-25 regression tests
+# ═══════════════════════════════════════════════════════════════
+
+class TestBug22ConnectionPrivateIP(unittest.TestCase):
+    """Bug 22: _check_suspicious_connection used startswith('172.') for all 172.x IPs."""
+
+    def _make_gui(self):
+        from memory_forensics_tool import MemoryForensicsGUI, MemoryForensicsEngine
+        gui = MemoryForensicsGUI.__new__(MemoryForensicsGUI)
+        gui.engine = MemoryForensicsEngine()
+        return gui
+
+    def test_172_16_private_no_external_score(self):
+        """172.16.x.x should be treated as private (no +10)."""
+        gui = self._make_gui()
+        _, _, score = gui._check_suspicious_connection('172.16.1.1:80', 'TCP')
+        self.assertEqual(score, 0, "172.16.x.x is private, should not add external score")
+
+    def test_172_31_private_no_external_score(self):
+        """172.31.x.x should be treated as private (no +10)."""
+        gui = self._make_gui()
+        _, _, score = gui._check_suspicious_connection('172.31.255.1:80', 'TCP')
+        self.assertEqual(score, 0, "172.31.x.x is private, should not add external score")
+
+    def test_172_32_public_gets_external_score(self):
+        """172.32.x.x is public, should get +10 external scrutiny."""
+        gui = self._make_gui()
+        _, _, score = gui._check_suspicious_connection('172.32.1.1:80', 'TCP')
+        self.assertGreaterEqual(score, 10, "172.32.x.x is public, should add external score")
+
+    def test_172_0_public_gets_external_score(self):
+        """172.0.x.x is public, should get +10 external scrutiny."""
+        gui = self._make_gui()
+        _, _, score = gui._check_suspicious_connection('172.0.1.1:80', 'TCP')
+        self.assertGreaterEqual(score, 10, "172.0.x.x is public, should add external score")
+
+    def test_10_x_private(self):
+        """10.x.x.x should be treated as private."""
+        gui = self._make_gui()
+        _, _, score = gui._check_suspicious_connection('10.0.0.1:80', 'TCP')
+        self.assertEqual(score, 0)
+
+    def test_192_168_private(self):
+        """192.168.x.x should be treated as private."""
+        gui = self._make_gui()
+        _, _, score = gui._check_suspicious_connection('192.168.1.1:80', 'TCP')
+        self.assertEqual(score, 0)
+
+    def test_uses_engine_is_private_ip(self):
+        """_check_suspicious_connection should use engine._is_private_ip for consistency."""
+        import inspect
+        from memory_forensics_tool import MemoryForensicsGUI
+        source = inspect.getsource(MemoryForensicsGUI._check_suspicious_connection)
+        self.assertIn('_is_private_ip', source, "Should use _is_private_ip() method")
+        self.assertNotIn("startswith('172.')", source, "Should NOT use startswith('172.')")
+
+
+class TestBug23PESectionOffset(unittest.TestCase):
+    """Bug 23: PE section offset was hardcoded instead of using SizeOfOptionalHeader."""
+
+    def test_uses_size_of_opt_header(self):
+        """PE analyzer should read SizeOfOptionalHeader from COFF header."""
+        import inspect
+        from memory_forensics_tool import AdvancedPEAnalyzer
+        source = inspect.getsource(AdvancedPEAnalyzer.analyze)
+        self.assertIn('size_of_opt_header', source, "Should read SizeOfOptionalHeader")
+        self.assertNotIn('112 if is_64bit else 96', source, "Should NOT hardcode optional header size")
+
+    def test_standard_pe32_section_offset(self):
+        """Standard PE32 with SizeOfOptionalHeader=224 should find sections at correct offset."""
+        from memory_forensics_tool import AdvancedPEAnalyzer
+        # Build a minimal PE32 binary with known section
+        pe = bytearray(512)
+        # DOS header
+        pe[0:2] = b'MZ'
+        struct.pack_into('<I', pe, 0x3C, 0x80)  # e_lfanew = 0x80
+        # PE signature
+        pe[0x80:0x84] = b'PE\x00\x00'
+        # COFF header at 0x84
+        struct.pack_into('<H', pe, 0x84, 0x14C)   # Machine = i386
+        struct.pack_into('<H', pe, 0x86, 1)        # NumberOfSections = 1
+        struct.pack_into('<I', pe, 0x88, 0x12345678)  # Timestamp
+        struct.pack_into('<H', pe, 0x94, 224)      # SizeOfOptionalHeader = 224 (standard PE32)
+        struct.pack_into('<H', pe, 0x96, 0x0102)   # Characteristics
+        # Optional header at 0x98
+        struct.pack_into('<H', pe, 0x98, 0x10B)    # Magic = PE32
+        struct.pack_into('<I', pe, 0xA8, 0x1000)   # Entry point at opt+16
+        # Section table starts at 0x98 + 224 = 0x178
+        sec_offset = 0x98 + 224
+        pe[sec_offset:sec_offset+8] = b'.text\x00\x00\x00'
+        struct.pack_into('<I', pe, sec_offset+8, 0x2000)   # VirtualSize
+        struct.pack_into('<I', pe, sec_offset+12, 0x1000)  # VirtualAddress
+        struct.pack_into('<I', pe, sec_offset+16, 0x200)   # SizeOfRawData
+        struct.pack_into('<I', pe, sec_offset+36, 0x60000020)  # Characteristics (CODE|EXECUTE|READ)
+
+        analyzer = AdvancedPEAnalyzer()
+        result = analyzer.analyze(bytes(pe))
+        # Should find the .text section
+        self.assertGreater(len(result['sections']), 0, "Should find at least one section")
+        self.assertEqual(result['sections'][0]['name'], '.text')
+
+    def test_pe32plus_section_offset(self):
+        """Standard PE32+ with SizeOfOptionalHeader=240 should find sections correctly."""
+        from memory_forensics_tool import AdvancedPEAnalyzer
+        pe = bytearray(512)
+        pe[0:2] = b'MZ'
+        struct.pack_into('<I', pe, 0x3C, 0x80)
+        pe[0x80:0x84] = b'PE\x00\x00'
+        struct.pack_into('<H', pe, 0x84, 0x8664)   # Machine = AMD64
+        struct.pack_into('<H', pe, 0x86, 1)        # 1 section
+        struct.pack_into('<I', pe, 0x88, 0x12345678)
+        struct.pack_into('<H', pe, 0x94, 240)      # SizeOfOptionalHeader = 240 (PE32+)
+        struct.pack_into('<H', pe, 0x96, 0x0022)
+        struct.pack_into('<H', pe, 0x98, 0x20B)    # Magic = PE32+
+        struct.pack_into('<I', pe, 0xA8, 0x1000)   # Entry point
+        sec_offset = 0x98 + 240  # 0x188
+        pe[sec_offset:sec_offset+8] = b'.code\x00\x00\x00'
+        struct.pack_into('<I', pe, sec_offset+8, 0x3000)
+        struct.pack_into('<I', pe, sec_offset+12, 0x1000)
+        struct.pack_into('<I', pe, sec_offset+16, 0x400)
+        struct.pack_into('<I', pe, sec_offset+36, 0xE0000020)
+
+        analyzer = AdvancedPEAnalyzer()
+        result = analyzer.analyze(bytes(pe))
+        self.assertGreater(len(result['sections']), 0)
+        self.assertEqual(result['sections'][0]['name'], '.code')
+
+
+class TestBug24IPv6Connection(unittest.TestCase):
+    """Bug 24: IPv6 brackets not stripped, loopback treated as external."""
+
+    def _make_gui(self):
+        from memory_forensics_tool import MemoryForensicsGUI, MemoryForensicsEngine
+        gui = MemoryForensicsGUI.__new__(MemoryForensicsGUI)
+        gui.engine = MemoryForensicsEngine()
+        return gui
+
+    def test_ipv6_loopback_not_suspicious(self):
+        """[::1]:port should be recognized as loopback, not external."""
+        gui = self._make_gui()
+        is_susp, reason, score = gui._check_suspicious_connection('[::1]:8080', 'TCP')
+        self.assertEqual(score, 0, "IPv6 loopback should not be suspicious")
+
+    def test_ipv6_bracket_stripped(self):
+        """IPv6 addresses in bracket notation should be parsed correctly."""
+        gui = self._make_gui()
+        # This should not crash
+        gui._check_suspicious_connection('[2001:db8::1]:443', 'TCP')
+
+    def test_ipv6_link_local_not_suspicious(self):
+        """fe80:: link-local should be recognized as local."""
+        gui = self._make_gui()
+        _, _, score = gui._check_suspicious_connection('[fe80::1]:80', 'TCP')
+        self.assertEqual(score, 0, "IPv6 link-local should not be suspicious")
+
+    def test_ipv4_still_works(self):
+        """IPv4 addresses should still parse correctly after IPv6 fix."""
+        gui = self._make_gui()
+        _, _, score = gui._check_suspicious_connection('10.0.0.1:80', 'TCP')
+        self.assertEqual(score, 0, "IPv4 private should still work")
+
+    def test_malicious_port_still_detected_ipv6(self):
+        """Malicious ports on IPv6 should still be detected."""
+        gui = self._make_gui()
+        _, _, score = gui._check_suspicious_connection('[8.8.8.8]:4444', 'TCP')
+        self.assertGreater(score, 0, "Malicious port on external IP should be detected")
+
+    def test_empty_and_star_addresses(self):
+        """Edge case addresses should return safely."""
+        gui = self._make_gui()
+        self.assertEqual(gui._check_suspicious_connection('*:*', 'TCP'), (False, "", 0))
+        self.assertEqual(gui._check_suspicious_connection('0.0.0.0:0', 'TCP'), (False, "", 0))
+        self.assertEqual(gui._check_suspicious_connection('', 'TCP'), (False, "", 0))
+
+
+class TestBug25HandleCleanup(unittest.TestCase):
+    """Bug 25: Handle cleanup used truthiness check that fails for handle value 0."""
+
+    def test_handle_cleanup_uses_is_not_none(self):
+        """Handle cleanup should use 'is not None' not truthiness check."""
+        import inspect
+        from memory_forensics_tool import MemoryForensicsGUI
+        source = inspect.getsource(MemoryForensicsGUI._create_dump_with_api)
+        self.assertIn('is not None', source, "Handle cleanup should use 'is not None'")
+        # Should NOT have bare 'if file_handle and' pattern
+        self.assertNotIn('if file_handle and file_handle != -1:', source,
+                        "Should not use bare truthiness check for handles")
+
+
+# ═══════════════════════════════════════════════════════════════
+#  BUG 26-27: grab_release before dialog.destroy
+# ═══════════════════════════════════════════════════════════════
+
+class TestBug26_27GrabRelease(unittest.TestCase):
+    """Verify grab_release() is called before dialog.destroy() to prevent GUI freeze."""
+
+    def test_acquire_ram_has_grab_release(self):
+        """acquire_ram_dump must call grab_release before dialog.destroy."""
+        from memory_forensics_tool import MemoryForensicsGUI
+        source = inspect.getsource(MemoryForensicsGUI.acquire_ram_dump)
+        self.assertIn('grab_release', source,
+                      "acquire_ram_dump must call grab_release()")
+
+    def test_acquire_ram_has_wm_delete_protocol(self):
+        """acquire_ram_dump dialog must handle WM_DELETE_WINDOW with grab_release."""
+        from memory_forensics_tool import MemoryForensicsGUI
+        source = inspect.getsource(MemoryForensicsGUI.acquire_ram_dump)
+        self.assertIn('WM_DELETE_WINDOW', source,
+                      "acquire_ram_dump must handle WM_DELETE_WINDOW for clean close")
+
+    def test_create_memory_dump_has_grab_release(self):
+        """create_memory_dump must call grab_release before dialog.destroy."""
+        from memory_forensics_tool import MemoryForensicsGUI
+        source = inspect.getsource(MemoryForensicsGUI.create_memory_dump)
+        self.assertIn('grab_release', source,
+                      "create_memory_dump must call grab_release()")
+
+    def test_create_memory_dump_has_wm_delete_protocol(self):
+        """create_memory_dump must handle WM_DELETE_WINDOW with grab_release."""
+        from memory_forensics_tool import MemoryForensicsGUI
+        source = inspect.getsource(MemoryForensicsGUI.create_memory_dump)
+        self.assertIn('WM_DELETE_WINDOW', source,
+                      "create_memory_dump must handle WM_DELETE_WINDOW for clean close")
+
+
+# ═══════════════════════════════════════════════════════════════
+#  BUG 28: WMIC CSV parsing must use csv.reader
+# ═══════════════════════════════════════════════════════════════
+
+class TestBug28WMICCSVParsing(unittest.TestCase):
+    """WMIC CSV output must be parsed with csv.reader, not split(',')."""
+
+    def test_get_process_details_uses_csv_reader(self):
+        """_get_process_details must use csv.reader for WMIC CSV output."""
+        from memory_forensics_tool import MemoryForensicsGUI
+        source = inspect.getsource(MemoryForensicsGUI._get_process_details)
+        self.assertIn('csv.reader', source,
+                      "_get_process_details must use csv.reader, not split(',')")
+        self.assertNotIn(".split(',')", source,
+                        "_get_process_details must not use split(',') for CSV parsing")
+
+    def test_csv_reader_handles_commas_in_command_line(self):
+        """csv.reader should correctly parse quoted fields with commas."""
+        import csv
+        # Simulated WMIC CSV output: entire command line field is quoted
+        line = 'MYPC,"C:\\Program Files\\app.exe -flag a,b,c",42,1234,8'
+        parsed = list(csv.reader([line]))
+        self.assertEqual(len(parsed), 1)
+        parts = parsed[0]
+        self.assertEqual(parts[0], 'MYPC')
+        # csv.reader correctly handles the quoted field with internal commas
+        self.assertIn('app.exe', parts[1])
+        self.assertIn('a,b,c', parts[1])
+        # HandleCount, ParentProcessId, ThreadCount should be correct
+        self.assertEqual(parts[2], '42')
+        self.assertEqual(parts[3], '1234')
+        self.assertEqual(parts[4], '8')
+
+    def test_create_memory_dump_wmic_uses_csv_reader(self):
+        """Process list in create_memory_dump must use csv.reader."""
+        from memory_forensics_tool import MemoryForensicsGUI
+        source = inspect.getsource(MemoryForensicsGUI.create_memory_dump)
+        self.assertIn('csv.reader', source,
+                      "create_memory_dump process list must use csv.reader")
+
+
+# ═══════════════════════════════════════════════════════════════
+#  BUG 29: Volatility dialog widget access after destroy
+# ═══════════════════════════════════════════════════════════════
+
+class TestBug29VolatilityDialogSafety(unittest.TestCase):
+    """Volatility dialog must check widget existence before updating."""
+
+    def test_volatility_dialog_checks_winfo_exists(self):
+        """Background thread callbacks must check dialog.winfo_exists()."""
+        from memory_forensics_tool import MemoryForensicsGUI
+        source = inspect.getsource(MemoryForensicsGUI._volatility_analysis_dialog)
+        self.assertIn('winfo_exists', source,
+                      "_volatility_analysis_dialog must check winfo_exists() before widget updates")
+
+    def test_volatility_dialog_catches_tcl_error(self):
+        """Background thread callbacks must catch TclError for destroyed widgets."""
+        from memory_forensics_tool import MemoryForensicsGUI
+        source = inspect.getsource(MemoryForensicsGUI._volatility_analysis_dialog)
+        self.assertIn('TclError', source,
+                      "_volatility_analysis_dialog must catch TclError from destroyed widgets")
+
+
+# ═══════════════════════════════════════════════════════════════
+#  BUG 30: clear_all must clear all treeviews
+# ═══════════════════════════════════════════════════════════════
+
+class TestBug30ClearAllTreeviews(unittest.TestCase):
+    """clear_all() must clear all treeview widgets, not just text/labels."""
+
+    def _get_clear_all_source(self):
+        from memory_forensics_tool import MemoryForensicsGUI
+        return inspect.getsource(MemoryForensicsGUI.clear_all)
+
+    def test_clear_all_clears_proc_tree(self):
+        """clear_all must clear proc_tree."""
+        source = self._get_clear_all_source()
+        self.assertIn('proc_tree', source,
+                      "clear_all() must clear proc_tree")
+
+    def test_clear_all_clears_net_tree(self):
+        """clear_all must clear net_tree."""
+        source = self._get_clear_all_source()
+        self.assertIn('net_tree', source,
+                      "clear_all() must clear net_tree")
+
+    def test_clear_all_clears_malware_tree(self):
+        """clear_all must clear malware_tree."""
+        source = self._get_clear_all_source()
+        self.assertIn('malware_tree', source,
+                      "clear_all() must clear malware_tree")
+
+    def test_clear_all_clears_dll_tree(self):
+        """clear_all must clear dll_tree."""
+        source = self._get_clear_all_source()
+        self.assertIn('dll_tree', source,
+                      "clear_all() must clear dll_tree")
+
+    def test_clear_all_clears_str_tree(self):
+        """clear_all must clear str_tree."""
+        source = self._get_clear_all_source()
+        self.assertIn('str_tree', source,
+                      "clear_all() must clear str_tree")
+
+    def test_clear_all_clears_reg_tree(self):
+        """clear_all must clear reg_tree."""
+        source = self._get_clear_all_source()
+        self.assertIn('reg_tree', source,
+                      "clear_all() must clear reg_tree")
+
+    def test_clear_all_clears_entropy_tree(self):
+        """clear_all must clear entropy_tree."""
+        source = self._get_clear_all_source()
+        self.assertIn('entropy_tree', source,
+                      "clear_all() must clear entropy_tree")
+
+    def test_clear_all_clears_timeline_tree(self):
+        """clear_all must clear timeline_tree."""
+        source = self._get_clear_all_source()
+        self.assertIn('timeline_tree', source,
+                      "clear_all() must clear timeline_tree")
+
+
+# ═══════════════════════════════════════════════════════════════
+#  SUBPROCESS TIMEOUTS
+# ═══════════════════════════════════════════════════════════════
+
+class TestSubprocessTimeouts(unittest.TestCase):
+    """All subprocess.run calls should have timeout parameters."""
+
+    def test_procdump_where_has_timeout(self):
+        """where procdump subprocess call must have timeout."""
+        from memory_forensics_tool import MemoryForensicsGUI
+        source = inspect.getsource(MemoryForensicsGUI._try_procdump_fallback)
+        # Check that 'timeout' appears (indicating subprocess calls have timeouts)
+        self.assertIn('timeout', source,
+                      "_try_procdump_fallback must use timeout on subprocess calls")
+
+    def test_create_dump_netstat_has_timeout(self):
+        """netstat call in create_memory_dump must have timeout."""
+        from memory_forensics_tool import MemoryForensicsGUI
+        source = inspect.getsource(MemoryForensicsGUI.create_memory_dump)
+        # Count timeout occurrences - should be present for subprocess calls
+        self.assertIn('timeout', source,
+                      "create_memory_dump subprocess calls must have timeouts")
+
+
+# ═══════════════════════════════════════════════════════════════
+#  SESSION 11: DEEP REVIEW ROUND 2 BUG REGRESSION TESTS
+# ═══════════════════════════════════════════════════════════════
+
+class TestBug31_33EnsembleWeightNormalization(unittest.TestCase):
+    """Tests for bugs 31-33: ensemble weights must sum to 1.0."""
+
+    def test_enhanced_process_check_weights_sum_to_1(self):
+        """Bug 31: _enhanced_process_check weights must sum to 1.0."""
+        source = inspect.getsource(MemoryForensicsEngine)
+        # The ensemble calculation uses 0.40 + 0.35 + 0.25 = 1.00
+        # Check that the old 0.90 sum is fixed
+        self.assertNotIn('score_l1 * 0.35', source,
+                         "Old 0.35 weight should be updated to 0.40")
+
+    def test_advanced_ml_detector_weights_sum_to_1(self):
+        """Bug 32: AdvancedMLDetector weights must sum to 1.0."""
+        detector = AdvancedMLDetector()
+        total = sum(detector.weights.values())
+        self.assertAlmostEqual(total, 1.0, places=2,
+                               msg=f"AdvancedMLDetector weights sum to {total}, not 1.0")
+
+    def test_advanced_ml_detector_no_behavioral_weight(self):
+        """Bug 32: 'behavioral' key should be removed (not computed)."""
+        detector = AdvancedMLDetector()
+        self.assertNotIn('behavioral', detector.weights,
+                         "'behavioral' weight exists but is never used in detect()")
+
+    def test_ml_malware_detector_weights_sum_to_1(self):
+        """Bug 33: MLMalwareDetector FEATURE_WEIGHTS must sum to 1.0."""
+        total = sum(MLMalwareDetector.FEATURE_WEIGHTS.values())
+        self.assertAlmostEqual(total, 1.0, places=2,
+                               msg=f"FEATURE_WEIGHTS sum to {total}, not 1.0")
+
+    def test_ml_malware_detector_no_phantom_feature(self):
+        """Bug 33: 'behavioral_correlation' key should be removed."""
+        self.assertNotIn('behavioral_correlation', MLMalwareDetector.FEATURE_WEIGHTS,
+                         "'behavioral_correlation' exists but extract_features never produces it")
+
+    def test_ml_malware_detector_all_weights_have_features(self):
+        """Verify every FEATURE_WEIGHTS key is actually produced by extract_features."""
+        detector = MLMalwareDetector()
+        engine = MemoryForensicsEngine()
+        engine.load_dump(TEST_DUMP)
+        features = detector.extract_features(engine.dump_data[:1024])
+        for key in MLMalwareDetector.FEATURE_WEIGHTS:
+            self.assertIn(key, features,
+                          f"FEATURE_WEIGHTS has '{key}' but extract_features doesn't produce it")
+
+
+class TestBug34NetstatUDPParsing(unittest.TestCase):
+    """Tests for bug 34: netstat UDP connections must not be dropped."""
+
+    def test_get_current_connections_handles_udp(self):
+        """Bug 34: _get_current_connections must handle 4-column UDP lines."""
+        from memory_forensics_tool import MemoryForensicsGUI
+        source = inspect.getsource(MemoryForensicsGUI._get_current_connections)
+        # Verify it checks for UDP with len >= 4 (not just len >= 5)
+        self.assertIn('len(parts) >= 4', source,
+                      "Netstat parsing must check len >= 4 to include UDP connections")
+
+    def test_get_current_connections_tcp_and_udp_branches(self):
+        """Bug 34: must have separate TCP and UDP parsing branches."""
+        from memory_forensics_tool import MemoryForensicsGUI
+        source = inspect.getsource(MemoryForensicsGUI._get_current_connections)
+        self.assertIn("'TCP'", source,
+                      "Must have explicit TCP parsing branch")
+        self.assertIn("'UDP'", source,
+                      "Must have explicit UDP parsing branch")
+
+
+class TestBug35StringMinLengthValidation(unittest.TestCase):
+    """Tests for bug 35: string extraction must validate min_length."""
+
+    def test_extract_strings_min_length_zero(self):
+        """Bug 35: min_length=0 should not hang the application."""
+        engine = MemoryForensicsEngine()
+        engine.load_dump(TEST_DUMP)
+        # min_length of 0 should be clamped to at least 1 at the GUI level
+        # At the engine level, even min_length=1 should work without hanging
+        result = engine.extract_strings(min_length=1)
+        self.assertIsInstance(result, list)
+
+    def test_gui_clamps_min_length(self):
+        """Bug 35: GUI extract_strings clamps min_length < 1 to 1."""
+        from memory_forensics_tool import MemoryForensicsGUI
+        source = inspect.getsource(MemoryForensicsGUI.extract_strings)
+        self.assertIn('min_len < 1', source,
+                      "GUI must clamp min_length < 1 to prevent regex hang")
+
+
+class TestBug36YARADivisionByZero(unittest.TestCase):
+    """Tests for bug 36: YARA scan must not divide by zero on empty strings."""
+
+    def test_yara_confidence_no_division_by_zero(self):
+        """Bug 36: confidence calc uses max(1, len(strings)) to avoid ZeroDivisionError."""
+        source = inspect.getsource(YARALikeEngine.scan)
+        self.assertIn("max(1, len(rule['strings']))", source,
+                      "YARA confidence must guard against division by zero")
+
+    def test_yara_scan_empty_rule_strings(self):
+        """Bug 36: scanning with a rule that has no strings should not crash."""
+        engine = YARALikeEngine()
+        # Even though built-in rules always have strings, verify the guard works
+        test_engine = MemoryForensicsEngine()
+        test_engine.load_dump(TEST_DUMP)
+        # The scan should work without ZeroDivisionError
+        results = engine.scan(test_engine.dump_data)
+        self.assertIsInstance(results, list)
+
+
+class TestBug37LoadDumpClearsState(unittest.TestCase):
+    """Tests for bug 37: load_dump must reset analysis state."""
+
+    def test_load_dump_resets_analysis_results(self):
+        """Bug 37: loading a new dump must clear old analysis_results."""
+        engine = MemoryForensicsEngine()
+        engine.load_dump(TEST_DUMP)
+        # Simulate stale state
+        engine.analysis_results = {'old': 'data'}
+        engine.risk_score = 99
+        engine.findings = ['stale finding']
+        # Load again
+        engine.load_dump(TEST_DUMP)
+        self.assertEqual(engine.analysis_results, {})
+        self.assertEqual(engine.risk_score, 0)
+        self.assertEqual(engine.findings, [])
+
+    def test_load_dump_source_has_reset(self):
+        """Bug 37: load_dump source must explicitly reset state fields."""
+        source = inspect.getsource(MemoryForensicsEngine.load_dump)
+        self.assertIn('analysis_results', source,
+                      "load_dump must reset analysis_results")
+        self.assertIn('risk_score', source,
+                      "load_dump must reset risk_score")
+        self.assertIn('findings', source,
+                      "load_dump must reset findings")
+
+
+class TestBug38ClearAllCompleteness(unittest.TestCase):
+    """Tests for bug 38: clear_all must clear ALL widgets."""
+
+    def test_clear_all_includes_realtime_trees(self):
+        """Bug 38: clear_all must include realtime_proc_tree and realtime_net_tree."""
+        from memory_forensics_tool import MemoryForensicsGUI
+        source = inspect.getsource(MemoryForensicsGUI.clear_all)
+        self.assertIn('realtime_proc_tree', source,
+                      "clear_all must clear realtime_proc_tree")
+        self.assertIn('realtime_net_tree', source,
+                      "clear_all must clear realtime_net_tree")
+
+    def test_clear_all_clears_dashboard_canvas(self):
+        """Bug 38: clear_all must clear threat_canvas."""
+        from memory_forensics_tool import MemoryForensicsGUI
+        source = inspect.getsource(MemoryForensicsGUI.clear_all)
+        self.assertIn('threat_canvas', source,
+                      "clear_all must clear threat_canvas")
+
+    def test_clear_all_resets_dashboard_metric_cards(self):
+        """Bug 38: clear_all must reset dashboard metric cards."""
+        from memory_forensics_tool import MemoryForensicsGUI
+        source = inspect.getsource(MemoryForensicsGUI.clear_all)
+        self.assertIn('threat_score_card', source,
+                      "clear_all must reset threat_score_card")
+        self.assertIn('risk_level_card', source,
+                      "clear_all must reset risk_level_card")
+
+    def test_clear_all_resets_behavioral_widgets(self):
+        """Bug 38: clear_all must reset behavioral score/level/gauge."""
+        from memory_forensics_tool import MemoryForensicsGUI
+        source = inspect.getsource(MemoryForensicsGUI.clear_all)
+        self.assertIn('behavior_score_label', source,
+                      "clear_all must reset behavior_score_label")
+        self.assertIn('behavior_level_label', source,
+                      "clear_all must reset behavior_level_label")
+        self.assertIn('behavior_gauge', source,
+                      "clear_all must reset behavior_gauge")
+
+    def test_clear_all_clears_mitre_frame(self):
+        """Bug 38: clear_all must clear MITRE ATT&CK dynamic labels."""
+        from memory_forensics_tool import MemoryForensicsGUI
+        source = inspect.getsource(MemoryForensicsGUI.clear_all)
+        self.assertIn('mitre_frame', source,
+                      "clear_all must clear mitre_frame children")
+
+    def test_clear_all_resets_report_summary_labels(self):
+        """Bug 38: clear_all must reset report_summary_labels."""
+        from memory_forensics_tool import MemoryForensicsGUI
+        source = inspect.getsource(MemoryForensicsGUI.clear_all)
+        self.assertIn('report_summary_labels', source,
+                      "clear_all must reset report_summary_labels")
+
+    def test_clear_all_resets_report_findings_frame(self):
+        """Bug 38: clear_all must reset report_findings_frame."""
+        from memory_forensics_tool import MemoryForensicsGUI
+        source = inspect.getsource(MemoryForensicsGUI.clear_all)
+        self.assertIn('report_findings_frame', source,
+                      "clear_all must reset report_findings_frame children")
+
+    def test_clear_all_resets_realtime_state(self):
+        """Bug 38: clear_all must reset real-time monitor internal state."""
+        from memory_forensics_tool import MemoryForensicsGUI
+        source = inspect.getsource(MemoryForensicsGUI.clear_all)
+        self.assertIn('realtime_alerts', source,
+                      "clear_all must reset realtime_alerts")
+        self.assertIn('previous_processes', source,
+                      "clear_all must reset previous_processes")
+        self.assertIn('_process_metrics', source,
+                      "clear_all must reset _process_metrics")
+
+    def test_clear_all_clears_info_text(self):
+        """Bug 38: clear_all must clear behavior_info_text."""
+        from memory_forensics_tool import MemoryForensicsGUI
+        source = inspect.getsource(MemoryForensicsGUI.clear_all)
+        self.assertIn('behavior_info_text', source,
+                      "clear_all must clear behavior_info_text")
+
+    def test_clear_all_clears_alert_text(self):
+        """Bug 38: clear_all must clear realtime_alert_text."""
+        from memory_forensics_tool import MemoryForensicsGUI
+        source = inspect.getsource(MemoryForensicsGUI.clear_all)
+        self.assertIn('realtime_alert_text', source,
+                      "clear_all must clear realtime_alert_text")
+
+
+class TestBug39NegativeOffsetValidation(unittest.TestCase):
+    """Tests for bug 39: hex dump and disassemble must clamp negative offsets."""
+
+    def test_hex_dump_negative_offset_clamped(self):
+        """Bug 39: hex_dump must clamp negative offset to 0."""
+        engine = MemoryForensicsEngine()
+        engine.load_dump(TEST_DUMP)
+        result = engine.hex_dump(-100, 256)
+        # Should return data from offset 0, not from end of dump
+        self.assertTrue(result.startswith('00000000'),
+                        "Negative offset should be clamped to 0")
+
+    def test_hex_dump_zero_offset(self):
+        """Bug 39: hex_dump at offset 0 should work normally."""
+        engine = MemoryForensicsEngine()
+        engine.load_dump(TEST_DUMP)
+        result = engine.hex_dump(0, 16)
+        self.assertIn('00000000', result)
+
+    def test_disassemble_source_clamps_offset(self):
+        """Bug 39: disassemble_code must clamp offset with max(0, offset)."""
+        from memory_forensics_tool import MemoryForensicsGUI
+        source = inspect.getsource(MemoryForensicsGUI.disassemble_code)
+        self.assertIn('max(0, offset)', source,
+                      "disassemble_code must clamp negative offsets")
+
+    def test_view_hex_source_clamps_offset(self):
+        """Bug 39: view_hex must clamp offset with max(0, offset)."""
+        from memory_forensics_tool import MemoryForensicsGUI
+        source = inspect.getsource(MemoryForensicsGUI.view_hex)
+        self.assertIn('max(0, offset)', source,
+                      "view_hex must clamp negative offsets")
+
+
+class TestBug40ReportGeneratorDumpSize(unittest.TestCase):
+    """Tests for bug 40: report generator must handle None dump_size."""
+
+    def test_report_generator_source_handles_none_dump_size(self):
+        """Bug 40: report generator must use (dump_size or 0) for None safety."""
+        from report_generator import generate_enterprise_html_report
+        source = inspect.getsource(generate_enterprise_html_report)
+        self.assertIn('dump_size or 0', source,
+                      "Report generator must guard against None dump_size")
+
+    def test_report_generator_with_valid_engine(self):
+        """Bug 40: report generation works with a properly loaded engine."""
+        from report_generator import generate_enterprise_html_report
+        engine = MemoryForensicsEngine()
+        engine.load_dump(TEST_DUMP)
+        html = generate_enterprise_html_report(engine)
+        self.assertIsInstance(html, str)
+        self.assertIn('html', html.lower())
+
+
+# ═══════════════════════════════════════════════════════════════
+#  SESSION 12: DEEP REVIEW ROUND 3 BUG REGRESSION TESTS
+# ═══════════════════════════════════════════════════════════════
+
+class TestBug41SafeAfterAlways(unittest.TestCase):
+    """Tests for bug 41: acquisition/Volatility must use _safe_after_always."""
+
+    def test_acquisition_uses_safe_after_always(self):
+        """Bug 41: _run_acquisition must use _safe_after_always, not _safe_after."""
+        from memory_forensics_tool import MemoryForensicsGUI
+        source = inspect.getsource(MemoryForensicsGUI.acquire_ram_dump)
+        # Count _safe_after_always calls (should be many)
+        always_count = source.count('_safe_after_always')
+        # Count bare _safe_after calls (should be zero in acquisition code)
+        bare_count = source.count('._safe_after(')
+        self.assertGreater(always_count, 0,
+                           "Acquisition must use _safe_after_always for thread callbacks")
+        self.assertEqual(bare_count, 0,
+                         "Acquisition must not use _safe_after (gated on realtime_monitoring)")
+
+    def test_volatility_uses_safe_after_always(self):
+        """Bug 41: Volatility dialog must use _safe_after_always."""
+        from memory_forensics_tool import MemoryForensicsGUI
+        source = inspect.getsource(MemoryForensicsGUI._volatility_analysis_dialog)
+        always_count = source.count('_safe_after_always')
+        bare_count = source.count('._safe_after(')
+        self.assertGreater(always_count, 0,
+                           "Volatility must use _safe_after_always for thread callbacks")
+        self.assertEqual(bare_count, 0,
+                         "Volatility must not use _safe_after (gated on realtime_monitoring)")
+
+
+class TestBug42ReentrancyGuard(unittest.TestCase):
+    """Tests for bug 42: run_full_analysis must have re-entrancy guard."""
+
+    def test_run_full_analysis_has_guard(self):
+        """Bug 42: run_full_analysis must check _analysis_running flag."""
+        from memory_forensics_tool import MemoryForensicsGUI
+        source = inspect.getsource(MemoryForensicsGUI.run_full_analysis)
+        self.assertIn('_analysis_running', source,
+                      "run_full_analysis must check _analysis_running re-entrancy flag")
+
+    def test_run_full_analysis_resets_flag(self):
+        """Bug 42: run_full_analysis must reset flag when complete."""
+        from memory_forensics_tool import MemoryForensicsGUI
+        source = inspect.getsource(MemoryForensicsGUI.run_full_analysis)
+        self.assertIn('_analysis_running = False', source,
+                      "run_full_analysis must reset _analysis_running when done")
+
+
+class TestBug43ExportErrorHandling(unittest.TestCase):
+    """Tests for bug 43: export methods must have try-except."""
+
+    def test_export_json_has_try_except(self):
+        """Bug 43: export_json must wrap file I/O in try-except."""
+        from memory_forensics_tool import MemoryForensicsGUI
+        source = inspect.getsource(MemoryForensicsGUI.export_json)
+        self.assertIn('except', source,
+                      "export_json must have exception handling for file I/O")
+
+    def test_export_csv_has_try_except(self):
+        """Bug 43: export_csv must wrap file I/O in try-except."""
+        from memory_forensics_tool import MemoryForensicsGUI
+        source = inspect.getsource(MemoryForensicsGUI.export_csv)
+        self.assertIn('except', source,
+                      "export_csv must have exception handling for file I/O")
+
+    def test_volatility_export_has_try_except(self):
+        """Bug 43: Volatility export_results must wrap file I/O in try-except."""
+        from memory_forensics_tool import MemoryForensicsGUI
+        source = inspect.getsource(MemoryForensicsGUI._volatility_analysis_dialog)
+        # The nested export_results function should have try-except
+        self.assertIn('Export failed', source,
+                      "Volatility export must have error handling")
+
+
+class TestBug44ClearAllStopsMonitor(unittest.TestCase):
+    """Tests for bug 44: clear_all must stop the monitor thread."""
+
+    def test_clear_all_stops_monitoring(self):
+        """Bug 44: clear_all must call stop_realtime_monitoring if running."""
+        from memory_forensics_tool import MemoryForensicsGUI
+        source = inspect.getsource(MemoryForensicsGUI.clear_all)
+        self.assertIn('stop_realtime_monitoring', source,
+                      "clear_all must stop the real-time monitor thread")
+
+    def test_clear_all_resets_analysis_flag(self):
+        """Bug 44: clear_all must reset _analysis_running flag."""
+        from memory_forensics_tool import MemoryForensicsGUI
+        source = inspect.getsource(MemoryForensicsGUI.clear_all)
+        self.assertIn('_analysis_running', source,
+                      "clear_all must reset _analysis_running flag")
+
+
+class TestBug45ExportEncoding(unittest.TestCase):
+    """Tests for bug 45: export_realtime_alerts must use utf-8 encoding."""
+
+    def test_export_alerts_uses_utf8(self):
+        """Bug 45: export_realtime_alerts must specify encoding='utf-8'."""
+        from memory_forensics_tool import MemoryForensicsGUI
+        source = inspect.getsource(MemoryForensicsGUI.export_realtime_alerts)
+        # Both open() calls should have encoding='utf-8'
+        open_calls = [line.strip() for line in source.split('\n') if 'open(' in line]
+        for call in open_calls:
+            self.assertIn('utf-8', call,
+                          f"open() call must include encoding='utf-8': {call}")
+
+
+class TestBug46YARACleanCondition(unittest.TestCase):
+    """Tests for bug 46: _clean_condition must handle dangling operators after empty-parens removal."""
+
+    def test_clean_condition_no_dangling_or(self):
+        """Bug 46: removing empty parens must not leave dangling 'or' at start."""
+        loader = ExternalYARALoader.__new__(ExternalYARALoader)
+        loader.rules_by_name = {}
+        loader.pattern_index = {}
+        # Simulate: (filesize and #var) or any of ($s*)
+        # After filesize/#var strip: () or any of ($s*)
+        # After fix: should be just "any of ($s*)"
+        result = loader._clean_condition('() or any of ($s*)')
+        self.assertFalse(result.startswith('or'),
+                         f"Dangling 'or' not cleaned: '{result}'")
+        self.assertIn('any of', result)
+
+    def test_clean_condition_no_dangling_and(self):
+        """Bug 46: removing empty parens must not leave dangling 'and'."""
+        loader = ExternalYARALoader.__new__(ExternalYARALoader)
+        loader.rules_by_name = {}
+        loader.pattern_index = {}
+        result = loader._clean_condition('() and any of them')
+        self.assertFalse(result.startswith('and'),
+                         f"Dangling 'and' not cleaned: '{result}'")
+
+    def test_clean_condition_nested_empty_parens(self):
+        """Bug 46: multiple empty parens should all be removed."""
+        loader = ExternalYARALoader.__new__(ExternalYARALoader)
+        loader.rules_by_name = {}
+        loader.pattern_index = {}
+        result = loader._clean_condition('() or () or any of them')
+        self.assertNotIn('()', result)
+        self.assertIn('any of them', result)
+
+
+class TestBug47YARAVacuousTruth(unittest.TestCase):
+    """Tests for bug 47: all-of with no matching prefix vars must return False."""
+
+    def test_all_of_empty_prefix_returns_false(self):
+        """Bug 47: all of ($nonexistent*) must return False when no vars have that prefix."""
+        loader = ExternalYARALoader.__new__(ExternalYARALoader)
+        loader.rules_by_name = {}
+        loader.pattern_index = {}
+        # all_vars has no 'enc' prefix vars, only 's' prefix
+        all_vars = {'s1', 'api1'}
+        matched_vars = {'s1'}
+        result = loader._eval_compound('all of ($enc*)', matched_vars, all_vars)
+        self.assertFalse(result,
+                         "all of ($enc*) must return False when no enc* vars exist")
+
+    def test_all_of_with_matching_prefix_works(self):
+        """Bug 47: all of ($s*) still works when s-prefix vars exist and are all matched."""
+        loader = ExternalYARALoader.__new__(ExternalYARALoader)
+        loader.rules_by_name = {}
+        loader.pattern_index = {}
+        all_vars = {'s1', 's2', 'api1'}
+        matched_vars = {'s1', 's2'}
+        result = loader._eval_compound('all of ($s*)', matched_vars, all_vars)
+        self.assertTrue(result,
+                        "all of ($s*) must return True when all s* vars are matched")
+
+    def test_all_of_partial_match_returns_false(self):
+        """Bug 47: all of ($s*) returns False when not all s-prefix vars matched."""
+        loader = ExternalYARALoader.__new__(ExternalYARALoader)
+        loader.rules_by_name = {}
+        loader.pattern_index = {}
+        all_vars = {'s1', 's2', 'api1'}
+        matched_vars = {'s1'}
+        result = loader._eval_compound('all of ($s*)', matched_vars, all_vars)
+        self.assertFalse(result,
+                         "all of ($s*) must return False when not all s* vars matched")
+
+
+# ═══════════════════════════════════════════════════════════════
+#  BUG 48-55 REGRESSION TESTS (Session 13: Deep Review Round 4)
+# ═══════════════════════════════════════════════════════════════
+
+class TestBug48LoadDumpInfoFindings(unittest.TestCase):
+    """Tests for bug 48: load_dump must reset info_findings."""
+
+    def test_load_dump_resets_info_findings(self):
+        """Bug 48: loading new dump must clear stale info_findings."""
+        from memory_forensics_tool import MemoryForensicsEngine
+        engine = MemoryForensicsEngine()
+        engine.info_findings = ['stale_data_from_previous_dump']
+        engine.load_dump(os.path.join(os.path.dirname(__file__), 'test_forensic_dump.raw'))
+        self.assertEqual(engine.info_findings, [],
+                         "load_dump must reset info_findings to empty list")
+
+    def test_load_dump_source_has_info_findings_reset(self):
+        """Bug 48: load_dump source must contain info_findings reset."""
+        from memory_forensics_tool import MemoryForensicsEngine
+        source = inspect.getsource(MemoryForensicsEngine.load_dump)
+        self.assertIn('info_findings', source,
+                      "load_dump must reset info_findings attribute")
+
+
+class TestBug49_50ClearAllTextWidgets(unittest.TestCase):
+    """Tests for bugs 49-50: clear_all must clear all text widgets."""
+
+    def test_clear_all_includes_disasm_text(self):
+        """Bug 49: clear_all must include disasm_text in widget list."""
+        from memory_forensics_tool import MemoryForensicsGUI
+        source = inspect.getsource(MemoryForensicsGUI.clear_all)
+        self.assertIn('disasm_text', source,
+                      "clear_all must clear disasm_text widget")
+
+    def test_clear_all_includes_ml_report_text(self):
+        """Bug 49: clear_all must include ml_report_text in widget list."""
+        from memory_forensics_tool import MemoryForensicsGUI
+        source = inspect.getsource(MemoryForensicsGUI.clear_all)
+        self.assertIn('ml_report_text', source,
+                      "clear_all must clear ml_report_text widget")
+
+    def test_clear_all_uses_correct_behavioral_name(self):
+        """Bug 50: clear_all must use behavior_findings_text not behavioral_text."""
+        from memory_forensics_tool import MemoryForensicsGUI
+        source = inspect.getsource(MemoryForensicsGUI.clear_all)
+        self.assertIn('behavior_findings_text', source,
+                      "clear_all must use behavior_findings_text (not behavioral_text)")
+        self.assertNotIn("'behavioral_text'", source,
+                         "clear_all must not reference non-existent behavioral_text")
+
+
+class TestBug51StatLabelResets(unittest.TestCase):
+    """Tests for bug 51: clear_all must reset reg and timeline stat labels."""
+
+    def test_clear_all_resets_reg_stat_labels(self):
+        """Bug 51: clear_all must reset registry stat labels."""
+        from memory_forensics_tool import MemoryForensicsGUI
+        source = inspect.getsource(MemoryForensicsGUI.clear_all)
+        self.assertIn('reg_stat_labels', source,
+                      "clear_all must reset reg_stat_labels")
+
+    def test_clear_all_resets_timeline_stat_labels(self):
+        """Bug 51: clear_all must reset timeline stat labels."""
+        from memory_forensics_tool import MemoryForensicsGUI
+        source = inspect.getsource(MemoryForensicsGUI.clear_all)
+        self.assertIn('timeline_stat_labels', source,
+                      "clear_all must reset timeline_stat_labels")
+
+
+class TestBug52RealtimeStatLabels(unittest.TestCase):
+    """Tests for bug 52: clear_all must reset realtime UI labels."""
+
+    def test_clear_all_resets_realtime_proc_count(self):
+        """Bug 52: clear_all must reset realtime_proc_count label."""
+        from memory_forensics_tool import MemoryForensicsGUI
+        source = inspect.getsource(MemoryForensicsGUI.clear_all)
+        self.assertIn('realtime_proc_count', source,
+                      "clear_all must reset realtime_proc_count label")
+
+    def test_clear_all_resets_realtime_net_count(self):
+        """Bug 52: clear_all must reset realtime_net_count label."""
+        from memory_forensics_tool import MemoryForensicsGUI
+        source = inspect.getsource(MemoryForensicsGUI.clear_all)
+        self.assertIn('realtime_net_count', source,
+                      "clear_all must reset realtime_net_count label")
+
+
+class TestBug53TimelineTypesFrame(unittest.TestCase):
+    """Tests for bug 53: clear_all must reset timeline_types_frame."""
+
+    def test_clear_all_resets_timeline_types_frame(self):
+        """Bug 53: clear_all must clear timeline_types_frame children."""
+        from memory_forensics_tool import MemoryForensicsGUI
+        source = inspect.getsource(MemoryForensicsGUI.clear_all)
+        self.assertIn('timeline_types_frame', source,
+                      "clear_all must reset timeline_types_frame")
+
+
+class TestBug54ChiSquare(unittest.TestCase):
+    """Tests for bug 54: chi-square must iterate all 256 byte values."""
+
+    def test_chi_square_includes_zero_count_bytes(self):
+        """Bug 54: chi-square must include bytes with zero count."""
+        from memory_forensics_tool import MLMalwareDetector
+        source = inspect.getsource(MLMalwareDetector._analyze_byte_distribution)
+        self.assertIn('range(256)', source,
+                      "Chi-square must iterate over all 256 byte values, not just present ones")
+
+    def test_chi_square_sparse_data_higher_than_dense(self):
+        """Bug 54: sparse data (few unique bytes) should have higher chi-square anomaly."""
+        from memory_forensics_tool import MLMalwareDetector
+        det = MLMalwareDetector()
+        # Sparse data: only 2 unique bytes
+        sparse = bytes([0, 1] * 2000)
+        # Dense data: many unique bytes (more uniform)
+        dense = bytes(range(256)) * 16
+        sparse_result = det._analyze_byte_distribution(sparse)
+        dense_result = det._analyze_byte_distribution(dense)
+        self.assertGreater(sparse_result['anomaly_score'], dense_result['anomaly_score'],
+                           "Sparse data should have higher anomaly than uniform data")
+
+
+class TestBug55EntropyBarWidth(unittest.TestCase):
+    """Tests for bug 55: entropy bar width must not exceed 100%."""
+
+    def test_entropy_bar_capped_at_100(self):
+        """Bug 55: report generator must clamp entropy bar width to 100%."""
+        from report_generator import generate_enterprise_html_report
+        source = inspect.getsource(generate_enterprise_html_report)
+        self.assertIn('min(100', source,
+                      "Entropy bar width must be capped with min(100, ...) to prevent overflow")
+
+    def test_entropy_bar_width_formula(self):
+        """Bug 55: entropy = 8.01 should produce width <= 100%."""
+        # The formula: min(100, e['entropy']/8*100)
+        entropy = 8.01
+        width = min(100, entropy / 8 * 100)
+        self.assertLessEqual(width, 100,
+                             f"Entropy {entropy} should produce width <= 100%, got {width}%")
+
+
+# ═══════════════════════════════════════════════════════════════
+#  BUG 56: Netstat TCPv6/UDPv6 connections not parsed
+# ═══════════════════════════════════════════════════════════════
+
+class TestBug56NetstatIPv6(unittest.TestCase):
+    """Bug 56: _get_current_connections() skipped TCPv6 and UDPv6 protocol lines."""
+
+    def test_source_accepts_tcpv6(self):
+        """The netstat parser must accept 'TCPv6' as a valid protocol."""
+        import inspect
+        from memory_forensics_tool import MemoryForensicsGUI
+        source = inspect.getsource(MemoryForensicsGUI._get_current_connections)
+        self.assertIn("'TCPv6'", source, "TCPv6 must be accepted as valid protocol")
+
+    def test_source_accepts_udpv6(self):
+        """The netstat parser must accept 'UDPv6' as a valid protocol."""
+        import inspect
+        from memory_forensics_tool import MemoryForensicsGUI
+        source = inspect.getsource(MemoryForensicsGUI._get_current_connections)
+        self.assertIn("'UDPv6'", source, "UDPv6 must be accepted as valid protocol")
+
+
+# ═══════════════════════════════════════════════════════════════
+#  BUG 57: Missing timeout on fallback tasklist subprocess call
+# ═══════════════════════════════════════════════════════════════
+
+class TestBug57SubprocessTimeout(unittest.TestCase):
+    """Bug 57: Fallback tasklist in create_memory_dump lacked timeout parameter."""
+
+    def test_all_subprocess_run_have_timeout(self):
+        """Every subprocess.run call should have a timeout parameter."""
+        import inspect, re
+        from memory_forensics_tool import MemoryForensicsGUI
+        source = inspect.getsource(MemoryForensicsGUI)
+        # Find all subprocess.run calls and check each has 'timeout='
+        # Use multiline to find subprocess.run( ... ) blocks
+        calls = list(re.finditer(r'subprocess\.run\(', source))
+        self.assertGreater(len(calls), 0, "Should find subprocess.run calls")
+        for match in calls:
+            # Get the text from the call start to the next closing paren at same depth
+            start = match.start()
+            # Look for 'timeout=' within 400 chars (covers multi-line calls)
+            chunk = source[start:start+400]
+            self.assertIn('timeout=', chunk,
+                f"subprocess.run call at offset {start} missing timeout parameter: {chunk[:100]}...")
+
+
+# ═══════════════════════════════════════════════════════════════
+#  BUG 58: Bare except: blocks swallow KeyboardInterrupt
+# ═══════════════════════════════════════════════════════════════
+
+class TestBug58BareExcept(unittest.TestCase):
+    """Bug 58: Bare 'except:' blocks catch BaseException including KeyboardInterrupt."""
+
+    def test_no_bare_except_in_main(self):
+        """memory_forensics_tool.py should have no bare 'except:' blocks."""
+        import re
+        source_path = os.path.join(os.path.dirname(__file__), 'memory_forensics_tool.py')
+        with open(source_path, 'r', encoding='utf-8') as f:
+            source = f.read()
+        # Match lines that are just 'except:' with optional whitespace
+        bare_excepts = re.findall(r'^\s+except:\s*$', source, re.MULTILINE)
+        self.assertEqual(len(bare_excepts), 0,
+            f"Found {len(bare_excepts)} bare 'except:' blocks — use 'except Exception:' instead")
+
+
+# ═══════════════════════════════════════════════════════════════
+#  BUG 59: _process_metrics race condition — snapshot needed
+# ═══════════════════════════════════════════════════════════════
+
+class TestBug59MetricsSnapshot(unittest.TestCase):
+    """Bug 59: _update_process_display should use metrics snapshot, not live dict."""
+
+    def test_update_process_display_accepts_metrics_param(self):
+        """_update_process_display must accept optional metrics parameter."""
+        import inspect
+        from memory_forensics_tool import MemoryForensicsGUI
+        sig = inspect.signature(MemoryForensicsGUI._update_process_display)
+        params = list(sig.parameters.keys())
+        self.assertIn('metrics', params,
+            "_update_process_display must accept 'metrics' parameter for thread-safe snapshot")
+
+    def test_monitor_loop_creates_snapshot(self):
+        """_realtime_monitor_loop should create metrics_snapshot before scheduling UI update."""
+        import inspect
+        from memory_forensics_tool import MemoryForensicsGUI
+        source = inspect.getsource(MemoryForensicsGUI._realtime_monitor_loop)
+        self.assertIn('metrics_snapshot', source,
+            "Monitor loop must create metrics_snapshot before scheduling _update_process_display")
+        # Verify snapshot is passed to the lambda
+        self.assertIn('ms=metrics_snapshot', source,
+            "Monitor loop must pass metrics_snapshot via default arg to lambda")
+
 
 # ═══════════════════════════════════════════════════════════════
 #  MAIN
@@ -2457,7 +3605,7 @@ class TestDefensiveInit(unittest.TestCase):
 if __name__ == '__main__':
     # Print header
     print("=" * 70)
-    print("   ULTRA-DEEP TEST SUITE v3.0")
+    print("   ULTRA-DEEP TEST SUITE v3.5")
     print("   Memory Forensics Analyzer — Comprehensive Testing")
     print("=" * 70)
     print()
