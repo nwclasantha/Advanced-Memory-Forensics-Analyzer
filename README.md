@@ -2,6 +2,8 @@
 
 A professional-grade, enterprise-level memory forensics GUI tool built with Python and tkinter. Features a 4-layer hybrid ML detection pipeline with external YARA rule integration targeting 99.6% precision, real-time system monitoring with live CPU/memory metrics, full RAM acquisition via WinPmem/DumpIt, Volatility 3 integration, MITRE ATT&CK mapping, and enterprise HTML report generation.
 
+<img width="2752" height="1460" alt="unnamed" src="https://github.com/user-attachments/assets/8ba3297d-416a-4fc3-a44a-43dbfa29b239" />
+
 ![Python](https://img.shields.io/badge/Python-3.8%2B-blue)
 ![Platform](https://img.shields.io/badge/Platform-Windows-lightgrey)
 ![License](https://img.shields.io/badge/License-MIT-green)
@@ -32,6 +34,8 @@ A professional-grade, enterprise-level memory forensics GUI tool built with Pyth
 ---
 
 ## Features
+
+https://github.com/user-attachments/assets/01e2c050-f24c-4d0b-b2a7-10be874d03ed
 
 ### Core Forensics
 - Load and analyze memory dumps (`.raw`, `.dmp`, `.mem`, `.vmem`)
@@ -213,13 +217,15 @@ A professional-grade, enterprise-level memory forensics GUI tool built with Pyth
 
 ## Architecture
 
+<img width="4312" height="6436" alt="NotebookLM Mind Map" src="https://github.com/user-attachments/assets/fb3317a2-02aa-4859-a5ac-431dc83812c0" />
+
 ```
 +------------------------------------------------------------------+
-|                    MemoryForensicsGUI                             |
+|                    MemoryForensicsGUI                            |
 |  (15-tab tkinter interface, 5000+ lines)                         |
 |                                                                  |
 |  Overview | Processes | Network | Malware | Dashboard | DLLs     |
-|  Strings | Behavioral | Registry | Entropy | Hex | Timeline     |
+|  Strings | Behavioral | Registry | Entropy | Hex | Timeline      |
 |  Code Analysis | Report | Real-Time                              |
 +------------------------------------------------------------------+
          |                    |                        |
@@ -242,9 +248,9 @@ A professional-grade, enterprise-level memory forensics GUI tool built with Pyth
          |
          v
 +------------------------------------------------------------------+
-|                   ML Detection Pipeline                           |
+|                   ML Detection Pipeline                          |
 |                                                                  |
-|  AdvancedMLDetector (Dump Scan Ensemble Orchestrator)             |
+|  AdvancedMLDetector (Dump Scan Ensemble Orchestrator)            |
 |  |                                                               |
 |  +-- AdvancedPEAnalyzer -----> PE headers, sections, imports     |
 |  |   (25% weight)                                                |
@@ -255,14 +261,14 @@ A professional-grade, enterprise-level memory forensics GUI tool built with Pyth
 |  +-- NGramAnalyzer ----------> byte sequence frequency           |
 |  |   (20% weight)              malicious pattern detection       |
 |  |                                                               |
-|  +-- ObfuscationDetector ----> entropy, XOR, Base64, packers    |
+|  +-- ObfuscationDetector ----> entropy, XOR, Base64, packers     |
 |      (15% weight)                                                |
 |                                                                  |
 |  ExternalYARALoader (Real-Time Monitor YARA Engine)              |
 |  |                                                               |
-|  +-- 100 .yar files ---------> 1,881 parsed rules               |
+|  +-- 100 .yar files ---------> 1,881 parsed rules                |
 |  +-- Inverted pattern index -> O(1) candidate lookup             |
-|  +-- Condition evaluator ----> any/all/N of, compound and/or    |
+|  +-- Condition evaluator ----> any/all/N of, compound and/or     |
 |  +-- Quality-weighted scoring  (single-match reduction: 0.25x)   |
 |                                                                  |
 |  MLMalwareDetector (Feature-Based Scoring)                       |
@@ -270,7 +276,7 @@ A professional-grade, enterprise-level memory forensics GUI tool built with Pyth
 |  +-- entropy_anomaly (15%) --+                                   |
 |  +-- api_pattern_score (25%) |                                   |
 |  +-- string_ioc_score (20%)  +-> Ensemble Score -> Validation    |
-|  +-- byte_distribution (10%) |   (threshold: 45)  (5 checks)    |
+|  +-- byte_distribution (10%) |   (threshold: 45)  (5 checks)     |
 |  +-- structural_anomaly (15%)|                                   |
 |  +-- behavioral_corr (15%) --+                                   |
 +------------------------------------------------------------------+
