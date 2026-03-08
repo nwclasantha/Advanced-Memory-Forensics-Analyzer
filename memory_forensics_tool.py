@@ -1986,12 +1986,13 @@ class MemoryForensicsEngine:
 
         return result
 
-    def get_ml_analysis_report(self):
+    def get_ml_analysis_report(self, result=None):
         """Generate comprehensive ML analysis report."""
         if not self.dump_data:
             return "No data loaded for ML analysis."
 
-        result = self.ml_detect_malware(precision_mode=True)
+        if result is None:
+            result = self.ml_detect_malware(precision_mode=True)
 
         report = []
         report.append("=" * 70)
@@ -2026,7 +2027,11 @@ class MemoryForensicsEngine:
         for key, label in feature_names.items():
             if key in features:
                 value = features[key]
-                bar = "█" * int(value * 20) + "░" * (20 - int(value * 20))
+                # Normalize entropy (0-8) to 0-1 range for bar display
+                display_value = value / 8.0 if key == 'entropy' else value
+                display_value = max(0.0, min(1.0, display_value))
+                bar_len = int(display_value * 20)
+                bar = "█" * bar_len + "░" * (20 - bar_len)
                 report.append(f"   {label:30} [{bar}] {value:.3f}")
 
         report.append("")
@@ -4465,6 +4470,7 @@ class MemoryForensicsGUI:
         self.realtime_status_indicator.configure(text="  RUNNING  ", bg='#27ae60')
         self.realtime_start_btn.configure(state='disabled')
         self.realtime_stop_btn.configure(state='normal')
+        self.realtime_alert_text.configure(state='normal')
         self.realtime_alert_text.delete('1.0', tk.END)
         self._add_realtime_alert("INFO", "Real-time monitoring started")
 
@@ -5416,7 +5422,7 @@ class MemoryForensicsGUI:
         self.realtime_alert_text.insert('1.0', f"[{level}] ", tag_map.get(level, 'info'))
         self.realtime_alert_text.insert('1.0', f"[{timestamp}] ", 'timestamp')
 
-        self.realtime_alert_text.configure(state='normal')
+        self.realtime_alert_text.configure(state='disabled')
 
         # Update alert count
         self.realtime_alert_count.configure(text=str(len(self.realtime_alerts)))
@@ -5424,8 +5430,10 @@ class MemoryForensicsGUI:
     def clear_realtime_alerts(self):
         """Clear all alerts."""
         self.realtime_alerts = []
+        self.realtime_alert_text.configure(state='normal')
         self.realtime_alert_text.delete('1.0', tk.END)
         self.realtime_alert_text.insert('1.0', "  Alerts cleared.\n")
+        self.realtime_alert_text.configure(state='disabled')
         self.realtime_alert_count.configure(text="0")
         self.new_process_count = 0
         self.suspicious_count = 0
@@ -5589,26 +5597,29 @@ class MemoryForensicsGUI:
 
         def process_next_step():
             """Process the next analysis step on the main thread."""
-            if self._analysis_step >= len(steps):
-                # All steps complete
-                self._analysis_running = False
-                self.update_status("✅ Full analysis complete!", self.COLORS['accent_green'])
-                self.set_progress(100)
-                self._update_overview_stats()
-                return
-
-            msg, func, progress = steps[self._analysis_step]
-            self.update_status(msg, self.COLORS['accent_orange'])
-            self.set_progress(progress)
-
             try:
-                func()
-            except Exception as e:
-                self.update_status(f"⚠ Warning during {msg}: {e}", self.COLORS['accent_orange'])
+                if self._analysis_step >= len(steps):
+                    # All steps complete
+                    self._analysis_running = False
+                    self.update_status("✅ Full analysis complete!", self.COLORS['accent_green'])
+                    self.set_progress(100)
+                    self._update_overview_stats()
+                    return
 
-            self._analysis_step += 1
-            # Schedule the next step after a brief delay to allow GUI to update
-            self.root.after(10, process_next_step)
+                msg, func, progress = steps[self._analysis_step]
+                self.update_status(msg, self.COLORS['accent_orange'])
+                self.set_progress(progress)
+
+                try:
+                    func()
+                except Exception as e:
+                    self.update_status(f"⚠ Warning during {msg}: {e}", self.COLORS['accent_orange'])
+
+                self._analysis_step += 1
+                # Schedule the next step after a brief delay to allow GUI to update
+                self.root.after(10, process_next_step)
+            except Exception:
+                self._analysis_running = False
 
         # Start the analysis
         self.update_status("🔍 Running full analysis...", self.COLORS['accent_orange'])
@@ -5637,12 +5648,16 @@ class MemoryForensicsGUI:
         net = self.engine.extract_network_artifacts()
         malware = self.engine.detect_malware_signatures()
 
+        procs = self.engine.find_processes()
+        dlls = self.engine.analyze_dlls()
+        strings = self.engine.extract_strings(6)
+
         stats = f"""
   ANALYSIS SUMMARY
   {'='*40}
 
-    Processes Found:      {len(self.engine.find_processes()):>8}
-    DLLs Detected:        {len(self.engine.analyze_dlls()):>8}
+    Processes Found:      {len(procs):>8}
+    DLLs Detected:        {len(dlls):>8}
     IP Addresses:         {len(net.get('ipv4', [])):>8}
     URLs Found:           {len(net.get('url', [])):>8}
     Emails Found:         {len(net.get('email', [])):>8}
@@ -5662,9 +5677,6 @@ class MemoryForensicsGUI:
         self.stats_text.insert('1.0', stats)
 
         # Update stat_labels in overview card
-        procs = self.engine.find_processes()
-        dlls = self.engine.analyze_dlls()
-        strings = self.engine.extract_strings(6)
         self.stat_labels['processes'].configure(text=str(len(procs)))
         self.stat_labels['dlls'].configure(text=str(len(dlls)))
         self.stat_labels['strings'].configure(text=str(len(strings)))
@@ -5771,8 +5783,8 @@ class MemoryForensicsGUI:
         result = self.engine.ml_detect_malware(precision_mode=True)
         self.set_progress(60)
 
-        # Update ML report text
-        report = self.engine.get_ml_analysis_report()
+        # Update ML report text — pass existing result to avoid double scan
+        report = self.engine.get_ml_analysis_report(result=result)
         self.ml_report_text.delete('1.0', 'end')
         self.ml_report_text.insert('1.0', report)
 
@@ -5879,8 +5891,9 @@ class MemoryForensicsGUI:
             },
         }
 
+        data_lower = data.lower()
         for malware_name, config in ram_malware_patterns.items():
-            matched = [p for p in config['patterns'] if p.lower() in data.lower()]
+            matched = [p for p in config['patterns'] if p.lower() in data_lower]
             if len(matched) >= config['min_match']:
                 confidence = min(99, (len(matched) / len(config['patterns'])) * 100 + 20)
                 all_detections.append({
@@ -6761,8 +6774,9 @@ class MemoryForensicsGUI:
         output.append("-" * 40)
         sus_found = False
 
+        dump_lower = self.engine.dump_data.lower()
         for string, risk_weight, desc in suspicious_strings:
-            if string in self.engine.dump_data.lower():
+            if string in dump_lower:
                 risk_score += risk_weight
                 output.append(f"  [!] Found '{string.decode()}' (+{risk_weight} risk) - {desc}")
                 sus_found = True
@@ -7225,7 +7239,7 @@ class MemoryForensicsGUI:
                         if not parsed:
                             continue
                         parts = [p.strip() for p in parsed[0]]
-                        if len(parts) >= 4:
+                        if len(parts) >= 5:
                             try:
                                 name = parts[1] if len(parts) > 1 else 'Unknown'
                                 cpu = parts[2] if len(parts) > 2 else '0'
@@ -7592,7 +7606,9 @@ class MemoryForensicsGUI:
             if self.realtime_monitoring:
                 self.stop_realtime_monitoring()
             self._analysis_running = False
+            self.yara_loader = None
             self.engine = MemoryForensicsEngine()
+            self._init_yara_loader()
             self.file_info_text.delete('1.0', 'end')
             self.file_info_text.insert('1.0', "No file loaded.")
             self.stats_text.delete('1.0', 'end')
@@ -7627,7 +7643,7 @@ class MemoryForensicsGUI:
             # Clear text widgets in analysis tabs
             for widget_name in ['behavior_findings_text', 'hex_text', 'report_text',
                                'code_analysis_text', 'behavior_info_text',
-                               'dashboard_details', 'realtime_alert_text',
+                               'dashboard_details',
                                'disasm_text', 'ml_report_text']:
                 widget = getattr(self, widget_name, None)
                 if widget:
@@ -7635,6 +7651,14 @@ class MemoryForensicsGUI:
                         widget.delete('1.0', 'end')
                     except Exception:
                         pass
+
+            # Clear realtime_alert_text separately — it may be state='disabled'
+            try:
+                self.realtime_alert_text.configure(state='normal')
+                self.realtime_alert_text.delete('1.0', 'end')
+                self.realtime_alert_text.insert('1.0', "  Real-time alerts will appear here...\n\n  Click START MONITORING to begin.")
+            except Exception:
+                pass
 
             # Reset registry and timeline stat labels
             for key in getattr(self, 'reg_stat_labels', {}):
@@ -7787,16 +7811,28 @@ class MemoryForensicsGUI:
                     return user_scripts
             except Exception:
                 pass
-        # Also check common Python3 script dirs
-        for pyver in ['Python313', 'Python312', 'Python311', 'Python310']:
+        # Also check common Python3 script dirs (with validation)
+        for pyver in ['Python312', 'Python311', 'Python310']:
             vol_path = os.path.join(os.path.expanduser('~'),
                 'AppData', 'Roaming', 'Python', pyver, 'Scripts', 'vol.exe')
             if os.path.isfile(vol_path):
-                return vol_path
+                try:
+                    r = subprocess.run([vol_path, '--help'], capture_output=True,
+                        text=True, timeout=10, creationflags=subprocess.CREATE_NO_WINDOW)
+                    if r.returncode == 0:
+                        return vol_path
+                except Exception:
+                    pass
             # Also check system Python
             sys_path = os.path.join(f'C:\\{pyver}', 'Scripts', 'vol.exe')
             if os.path.isfile(sys_path):
-                return sys_path
+                try:
+                    r = subprocess.run([sys_path, '--help'], capture_output=True,
+                        text=True, timeout=10, creationflags=subprocess.CREATE_NO_WINDOW)
+                    if r.returncode == 0:
+                        return sys_path
+                except Exception:
+                    pass
         return None
 
     def acquire_ram_dump(self):
@@ -8005,6 +8041,9 @@ class MemoryForensicsGUI:
                 fg='#f59e0b')
             dialog.update()
 
+            # Read tkinter variable on main thread before spawning background thread
+            should_auto_analyze = auto_analyze.get()
+
             def _run_acquisition():
                 try:
                     if tool_id == 'winpmem':
@@ -8014,11 +8053,11 @@ class MemoryForensicsGUI:
                     elif tool_id == 'ftk':
                         # FTK Imager is GUI-based, just launch it
                         os.startfile(tool_path)
-                        self._safe_after_always(lambda: status_label.configure(
+                        self._safe_after_always(lambda: dialog.winfo_exists() and status_label.configure(
                             text="FTK Imager launched. Create dump manually, then load it.",
                             fg='#2ed573'))
-                        self._safe_after_always(lambda: progress.stop())
-                        self._safe_after_always(lambda: acquire_btn.configure(state='normal'))
+                        self._safe_after_always(lambda: dialog.winfo_exists() and progress.stop())
+                        self._safe_after_always(lambda: dialog.winfo_exists() and acquire_btn.configure(state='normal'))
                         return
 
                     result = subprocess.run(cmd, capture_output=True, text=True,
@@ -8026,14 +8065,21 @@ class MemoryForensicsGUI:
 
                     if os.path.exists(filepath) and os.path.getsize(filepath) > 0:
                         size_mb = os.path.getsize(filepath) / (1024 * 1024)
-                        self._safe_after_always(lambda: progress.stop())
-                        self._safe_after_always(lambda: status_label.configure(
+                        self._safe_after_always(lambda: dialog.winfo_exists() and progress.stop())
+                        self._safe_after_always(lambda: dialog.winfo_exists() and status_label.configure(
                             text=f"SUCCESS! Dump saved: {size_mb:.0f} MB",
                             fg='#2ed573'))
-                        self._safe_after_always(lambda: acquire_btn.configure(state='normal'))
+                        self._safe_after_always(lambda: dialog.winfo_exists() and acquire_btn.configure(state='normal'))
 
-                        if auto_analyze.get():
+                        if should_auto_analyze:
                             def _load():
+                                if not dialog.winfo_exists():
+                                    self.engine.load_dump(filepath)
+                                    self._update_file_info(filepath)
+                                    self.update_status(
+                                        f"RAM dump loaded: {size_mb:.0f} MB",
+                                        self.COLORS['accent_green'])
+                                    return
                                 try:
                                     dialog.grab_release()
                                 except Exception:
@@ -8047,21 +8093,21 @@ class MemoryForensicsGUI:
                             self._safe_after_always(_load)
                     else:
                         err = result.stderr or result.stdout or "Unknown error"
-                        self._safe_after_always(lambda: progress.stop())
-                        self._safe_after_always(lambda e=err: status_label.configure(
+                        self._safe_after_always(lambda: dialog.winfo_exists() and progress.stop())
+                        self._safe_after_always(lambda e=err: dialog.winfo_exists() and status_label.configure(
                             text=f"FAILED: {e[:100]}", fg='#ff4757'))
-                        self._safe_after_always(lambda: acquire_btn.configure(state='normal'))
+                        self._safe_after_always(lambda: dialog.winfo_exists() and acquire_btn.configure(state='normal'))
 
                 except subprocess.TimeoutExpired:
-                    self._safe_after_always(lambda: progress.stop())
-                    self._safe_after_always(lambda: status_label.configure(
+                    self._safe_after_always(lambda: dialog.winfo_exists() and progress.stop())
+                    self._safe_after_always(lambda: dialog.winfo_exists() and status_label.configure(
                         text="Acquisition timed out (10 min limit)", fg='#ff4757'))
-                    self._safe_after_always(lambda: acquire_btn.configure(state='normal'))
+                    self._safe_after_always(lambda: dialog.winfo_exists() and acquire_btn.configure(state='normal'))
                 except Exception as e:
-                    self._safe_after_always(lambda: progress.stop())
-                    self._safe_after_always(lambda err=str(e): status_label.configure(
+                    self._safe_after_always(lambda: dialog.winfo_exists() and progress.stop())
+                    self._safe_after_always(lambda err=str(e): dialog.winfo_exists() and status_label.configure(
                         text=f"Error: {err[:100]}", fg='#ff4757'))
-                    self._safe_after_always(lambda: acquire_btn.configure(state='normal'))
+                    self._safe_after_always(lambda: dialog.winfo_exists() and acquire_btn.configure(state='normal'))
 
             threading.Thread(target=_run_acquisition, daemon=True).start()
 
@@ -8103,6 +8149,16 @@ class MemoryForensicsGUI:
         dialog.geometry("900x700")
         dialog.configure(bg=self.COLORS['bg_dark'])
         dialog.transient(self.root)
+        dialog.grab_set()
+
+        def _close_vol_dialog():
+            try:
+                dialog.grab_release()
+            except Exception:
+                pass
+            dialog.destroy()
+
+        dialog.protocol("WM_DELETE_WINDOW", _close_vol_dialog)
 
         # Header
         tk.Label(dialog, text="VOLATILITY 3 ANALYSIS",
@@ -8257,7 +8313,7 @@ class MemoryForensicsGUI:
             bg=self.COLORS['accent_blue'], fg='white',
             font=('Segoe UI', 11, 'bold'), padx=20, pady=8, relief='flat').pack(side='left', padx=8)
 
-        tk.Button(btn_frame, text="Close", command=dialog.destroy,
+        tk.Button(btn_frame, text="Close", command=_close_vol_dialog,
             bg=self.COLORS['accent_red'], fg='white',
             font=('Segoe UI', 11, 'bold'), padx=20, pady=8, relief='flat').pack(side='left', padx=8)
 

@@ -2912,9 +2912,11 @@ class TestBug31_33EnsembleWeightNormalization(unittest.TestCase):
 
     def test_enhanced_process_check_weights_sum_to_1(self):
         """Bug 31: _enhanced_process_check weights must sum to 1.0."""
-        source = inspect.getsource(MemoryForensicsEngine)
+        from memory_forensics_tool import MemoryForensicsGUI
+        source = inspect.getsource(MemoryForensicsGUI._enhanced_process_check)
         # The ensemble calculation uses 0.40 + 0.35 + 0.25 = 1.00
-        # Check that the old 0.90 sum is fixed
+        self.assertIn('score_l1 * 0.40', source,
+                       "score_l1 weight must be 0.40")
         self.assertNotIn('score_l1 * 0.35', source,
                          "Old 0.35 weight should be updated to 0.40")
 
@@ -3177,9 +3179,20 @@ class TestBug40ReportGeneratorDumpSize(unittest.TestCase):
         from report_generator import generate_enterprise_html_report
         engine = MemoryForensicsEngine()
         engine.load_dump(TEST_DUMP)
-        html = generate_enterprise_html_report(engine)
-        self.assertIsInstance(html, str)
-        self.assertIn('html', html.lower())
+        with tempfile.NamedTemporaryFile(suffix='.html', delete=False) as f:
+            tmp_path = f.name
+        try:
+            result_path = generate_enterprise_html_report(engine, tmp_path)
+            self.assertEqual(result_path, tmp_path)
+            with open(tmp_path, 'r', encoding='utf-8') as f:
+                content = f.read()
+            self.assertIn('<html', content,
+                "Report must contain valid HTML")
+            self.assertIn('Memory Forensics', content,
+                "Report must contain Memory Forensics header")
+        finally:
+            if os.path.exists(tmp_path):
+                os.unlink(tmp_path)
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -3333,8 +3346,8 @@ class TestBug47YARAVacuousTruth(unittest.TestCase):
         loader = ExternalYARALoader.__new__(ExternalYARALoader)
         loader.rules_by_name = {}
         loader.pattern_index = {}
-        # all_vars has no 'enc' prefix vars, only 's' prefix
-        all_vars = {'s1', 'api1'}
+        # all_vars has no 'enc' prefix vars, only 's' prefix — use dict (matches production format)
+        all_vars = {'s1': ('sig1', False), 'api1': ('sig2', False)}
         matched_vars = {'s1'}
         result = loader._eval_compound('all of ($enc*)', matched_vars, all_vars)
         self.assertFalse(result,
@@ -3345,7 +3358,7 @@ class TestBug47YARAVacuousTruth(unittest.TestCase):
         loader = ExternalYARALoader.__new__(ExternalYARALoader)
         loader.rules_by_name = {}
         loader.pattern_index = {}
-        all_vars = {'s1', 's2', 'api1'}
+        all_vars = {'s1': ('sig1', False), 's2': ('sig2', False), 'api1': ('sig3', False)}
         matched_vars = {'s1', 's2'}
         result = loader._eval_compound('all of ($s*)', matched_vars, all_vars)
         self.assertTrue(result,
@@ -3356,7 +3369,7 @@ class TestBug47YARAVacuousTruth(unittest.TestCase):
         loader = ExternalYARALoader.__new__(ExternalYARALoader)
         loader.rules_by_name = {}
         loader.pattern_index = {}
-        all_vars = {'s1', 's2', 'api1'}
+        all_vars = {'s1': ('sig1', False), 's2': ('sig2', False), 'api1': ('sig3', False)}
         matched_vars = {'s1'}
         result = loader._eval_compound('all of ($s*)', matched_vars, all_vars)
         self.assertFalse(result,
@@ -3596,6 +3609,444 @@ class TestBug59MetricsSnapshot(unittest.TestCase):
         # Verify snapshot is passed to the lambda
         self.assertIn('ms=metrics_snapshot', source,
             "Monitor loop must pass metrics_snapshot via default arg to lambda")
+
+
+# ═══════════════════════════════════════════════════════════════
+#  BUG 60: _add_realtime_alert must set state='disabled' after insert
+# ═══════════════════════════════════════════════════════════════
+
+class TestBug60AlertTextDisabled(unittest.TestCase):
+    """Bug 60: _add_realtime_alert must lock the text widget after inserting."""
+
+    def test_alert_text_set_disabled_after_insert(self):
+        """The last configure call in _add_realtime_alert must set state='disabled'."""
+        import re
+        from memory_forensics_tool import MemoryForensicsGUI
+        source = inspect.getsource(MemoryForensicsGUI._add_realtime_alert)
+        # Find all configure(state=...) calls
+        state_calls = re.findall(r"configure\(state='(\w+)'\)", source)
+        self.assertGreaterEqual(len(state_calls), 2,
+            "Must have at least 2 state configure calls (normal then disabled)")
+        self.assertEqual(state_calls[-1], 'disabled',
+            "Last state configure in _add_realtime_alert must be 'disabled', not 'normal'")
+
+
+# ═══════════════════════════════════════════════════════════════
+#  BUG 61: auto_analyze must be read on main thread, not in background
+# ═══════════════════════════════════════════════════════════════
+
+class TestBug61AutoAnalyzeThreadSafe(unittest.TestCase):
+    """Bug 61: auto_analyze.get() must not be called from background thread."""
+
+    def test_auto_analyze_read_before_thread(self):
+        """should_auto_analyze must be read before _run_acquisition thread."""
+        from memory_forensics_tool import MemoryForensicsGUI
+        source = inspect.getsource(MemoryForensicsGUI.acquire_ram_dump)
+        self.assertIn('should_auto_analyze', source,
+            "Must read auto_analyze.get() into should_auto_analyze before thread starts")
+
+    def test_no_auto_analyze_get_in_run_acquisition(self):
+        """_run_acquisition must not call auto_analyze.get() — must use should_auto_analyze."""
+        from memory_forensics_tool import MemoryForensicsGUI
+        source = inspect.getsource(MemoryForensicsGUI.acquire_ram_dump)
+        # Find the _run_acquisition function body (after 'def _run_acquisition')
+        acq_start = source.find('def _run_acquisition')
+        self.assertGreater(acq_start, -1, "_run_acquisition function not found")
+        acq_body = source[acq_start:]
+        self.assertNotIn('auto_analyze.get()', acq_body,
+            "Must not call auto_analyze.get() inside _run_acquisition — use should_auto_analyze instead")
+
+
+# ═══════════════════════════════════════════════════════════════
+#  BUG 62: run_full_analysis must reset _analysis_running on exception
+# ═══════════════════════════════════════════════════════════════
+
+class TestBug62AnalysisRunningReset(unittest.TestCase):
+    """Bug 62: _analysis_running must be reset if process_next_step throws."""
+
+    def test_process_next_step_has_except_reset(self):
+        """process_next_step must reset _analysis_running in except block."""
+        from memory_forensics_tool import MemoryForensicsGUI
+        source = inspect.getsource(MemoryForensicsGUI.run_full_analysis)
+        # Must have an outer try/except that resets _analysis_running
+        self.assertIn('except Exception', source)
+        # The except block must reset the flag
+        lines = source.split('\n')
+        found_outer_except_reset = False
+        for i, line in enumerate(lines):
+            if '_analysis_running = False' in line:
+                # Check if there's an except Exception nearby above
+                for j in range(max(0, i - 3), i):
+                    if 'except Exception' in lines[j] or 'except:' in lines[j]:
+                        found_outer_except_reset = True
+                        break
+        self.assertTrue(found_outer_except_reset,
+            "process_next_step must reset _analysis_running = False in an except block")
+
+
+# ═══════════════════════════════════════════════════════════════
+#  BUG 63: hybrid_malware_scan must precompute data.lower()
+# ═══════════════════════════════════════════════════════════════
+
+class TestBug63DataLowerPrecomputed(unittest.TestCase):
+    """Bug 63: hybrid_malware_scan must compute data.lower() once, not per-pattern."""
+
+    def test_data_lower_hoisted(self):
+        """data.lower() must be called once outside the loop."""
+        from memory_forensics_tool import MemoryForensicsGUI
+        source = inspect.getsource(MemoryForensicsGUI.hybrid_malware_scan)
+        self.assertIn('data_lower', source,
+            "Must precompute data_lower = data.lower() before the loop")
+        # Ensure data.lower() is NOT inside the list comprehension
+        self.assertNotIn('in data.lower()', source,
+            "Must not call data.lower() inside the list comprehension — use data_lower")
+
+
+# ═══════════════════════════════════════════════════════════════
+#  BUG 64: analyze_code_patterns must precompute dump_data.lower()
+# ═══════════════════════════════════════════════════════════════
+
+class TestBug64DumpLowerPrecomputed(unittest.TestCase):
+    """Bug 64: analyze_code_patterns must compute dump_data.lower() once."""
+
+    def test_dump_lower_hoisted(self):
+        """dump_data.lower() must be called once outside the loop."""
+        from memory_forensics_tool import MemoryForensicsGUI
+        source = inspect.getsource(MemoryForensicsGUI.analyze_code_patterns)
+        self.assertIn('dump_lower', source,
+            "Must precompute dump_lower = self.engine.dump_data.lower()")
+        # Ensure the loop body uses dump_lower, not dump_data.lower()
+        loop_body = source.split('for string, risk_weight, desc in suspicious_strings:')[1]
+        self.assertNotIn('self.engine.dump_data.lower()', loop_body,
+            "Must not call dump_data.lower() inside the loop — use dump_lower")
+
+
+# ═══════════════════════════════════════════════════════════════
+#  BUG 65: clear_all must reset yara_loader
+# ═══════════════════════════════════════════════════════════════
+
+class TestBug65YaraLoaderReset(unittest.TestCase):
+    """Bug 65: clear_all must reset yara_loader to None and re-init."""
+
+    def test_clear_all_resets_yara_loader(self):
+        """clear_all must set self.yara_loader = None."""
+        from memory_forensics_tool import MemoryForensicsGUI
+        source = inspect.getsource(MemoryForensicsGUI.clear_all)
+        self.assertIn('yara_loader = None', source,
+            "clear_all must reset yara_loader to None")
+
+    def test_clear_all_reinits_yara_loader(self):
+        """clear_all must call _init_yara_loader() to reload rules."""
+        from memory_forensics_tool import MemoryForensicsGUI
+        source = inspect.getsource(MemoryForensicsGUI.clear_all)
+        self.assertIn('_init_yara_loader', source,
+            "clear_all must call _init_yara_loader() after resetting")
+
+
+# ═══════════════════════════════════════════════════════════════
+#  BUG 66: Volatility dialog must use grab_set and proper close
+# ═══════════════════════════════════════════════════════════════
+
+class TestBug66VolatilityDialogModal(unittest.TestCase):
+    """Bug 66: Volatility dialog must call grab_set() and use proper close."""
+
+    def test_volatility_dialog_grab_set(self):
+        """_volatility_analysis_dialog must call grab_set()."""
+        from memory_forensics_tool import MemoryForensicsGUI
+        source = inspect.getsource(MemoryForensicsGUI._volatility_analysis_dialog)
+        self.assertIn('grab_set()', source,
+            "Volatility dialog must call dialog.grab_set()")
+
+    def test_volatility_dialog_grab_release_on_close(self):
+        """Close button must call grab_release() before destroy()."""
+        from memory_forensics_tool import MemoryForensicsGUI
+        source = inspect.getsource(MemoryForensicsGUI._volatility_analysis_dialog)
+        self.assertIn('grab_release()', source,
+            "Volatility dialog must call grab_release() before destroy()")
+
+    def test_volatility_dialog_wm_delete_protocol(self):
+        """Dialog must set WM_DELETE_WINDOW protocol."""
+        from memory_forensics_tool import MemoryForensicsGUI
+        source = inspect.getsource(MemoryForensicsGUI._volatility_analysis_dialog)
+        self.assertIn('WM_DELETE_WINDOW', source,
+            "Volatility dialog must handle WM_DELETE_WINDOW protocol")
+
+
+# ═══════════════════════════════════════════════════════════════
+#  BUG 67: _run_acquisition must guard dialog widget access
+# ═══════════════════════════════════════════════════════════════
+
+class TestBug67AcquisitionWidgetGuards(unittest.TestCase):
+    """Bug 67: _run_acquisition callbacks must check dialog.winfo_exists()."""
+
+    def test_acquisition_callbacks_guard_dialog(self):
+        """All dialog widget callbacks must check winfo_exists()."""
+        from memory_forensics_tool import MemoryForensicsGUI
+        source = inspect.getsource(MemoryForensicsGUI.acquire_ram_dump)
+        # Count winfo_exists() calls — should be many (one per callback)
+        count = source.count('winfo_exists()')
+        self.assertGreaterEqual(count, 10,
+            f"Expected 10+ winfo_exists() guards in acquisition callbacks, found {count}")
+
+
+# ═══════════════════════════════════════════════════════════════
+#  BUG 68: Report risk_score CSS width must be clamped
+# ═══════════════════════════════════════════════════════════════
+
+class TestBug68ReportRiskScoreClamped(unittest.TestCase):
+    """Bug 68: risk_score in CSS width must be clamped to 0-100."""
+
+    def test_risk_bar_width_clamped(self):
+        """Risk bar CSS width must use min/max clamping."""
+        from report_generator import generate_enterprise_html_report
+        source = inspect.getsource(generate_enterprise_html_report)
+        # Must contain clamped width expression
+        self.assertIn('min(100', source,
+            "Risk bar width must clamp with min(100, ...) to prevent overflow")
+        self.assertIn('max(0', source,
+            "Risk bar width must clamp with max(0, ...) to prevent negative width")
+
+
+# ═══════════════════════════════════════════════════════════════
+#  BUG 69: WMIC CSV guard must require len(parts) >= 5
+# ═══════════════════════════════════════════════════════════════
+
+class TestBug69WmicCsvGuard(unittest.TestCase):
+    """Bug 69: WMIC CSV parsing must require 5 parts (Node + 4 data columns)."""
+
+    def test_wmic_guard_requires_5_parts(self):
+        """create_memory_dump WMIC parser must check len(parts) >= 5."""
+        from memory_forensics_tool import MemoryForensicsGUI
+        source = inspect.getsource(MemoryForensicsGUI.create_memory_dump)
+        self.assertIn('len(parts) >= 5', source,
+            "WMIC CSV guard must be >= 5 (Node + 4 data columns), not >= 4")
+        self.assertNotIn('len(parts) >= 4', source,
+            "Old guard len(parts) >= 4 must be replaced with >= 5")
+
+
+# ═══════════════════════════════════════════════════════════════
+#  BUG 70: Report malware ternary must not have dead code branch
+# ═══════════════════════════════════════════════════════════════
+
+class TestBug70MalwareTernaryFixed(unittest.TestCase):
+    """Bug 70: Malware section ternary must not have dead code — 'No malware' card must be reachable."""
+
+    def test_malware_ternary_not_double_negated(self):
+        """The malware ternary must use simple (TABLE) if malware else FALLBACK, no double negation."""
+        from report_generator import generate_enterprise_html_report
+        source = inspect.getsource(generate_enterprise_html_report)
+        # Must NOT have the old double-negation pattern: "" if not malware else ... if malware else ...
+        self.assertNotIn('"" if not malware', source,
+            "Must not use double-negation pattern '\"\" if not malware else ...' — "
+            "the 'No malware' green card becomes dead code")
+
+    def test_no_malware_card_reachable(self):
+        """The 'No malware signatures detected' card must be in the source."""
+        from report_generator import generate_enterprise_html_report
+        source = inspect.getsource(generate_enterprise_html_report)
+        self.assertIn('No malware signatures detected', source,
+            "Report must contain 'No malware signatures detected' fallback")
+        # The fallback must be in a simple ternary: ) if malware else ...
+        self.assertIn(') if malware else', source,
+            "Malware section must use simple '(...) if malware else FALLBACK' pattern")
+
+
+# ═══════════════════════════════════════════════════════════════
+#  BUG 71-73: Disabled alert text widget cascade
+# ═══════════════════════════════════════════════════════════════
+
+class TestBug71AlertTextDisabledCascade(unittest.TestCase):
+    """Bug 71-73: After state='disabled', clear/start/clear_all must set state='normal' first."""
+
+    def test_clear_realtime_alerts_enables_before_delete(self):
+        """clear_realtime_alerts must set state='normal' before modifying text."""
+        from memory_forensics_tool import MemoryForensicsGUI
+        source = inspect.getsource(MemoryForensicsGUI.clear_realtime_alerts)
+        lines = source.split('\n')
+        normal_line = None
+        delete_line = None
+        for i, line in enumerate(lines):
+            if "state='normal'" in line and normal_line is None:
+                normal_line = i
+            if '.delete(' in line and delete_line is None:
+                delete_line = i
+        self.assertIsNotNone(normal_line,
+            "clear_realtime_alerts must call configure(state='normal')")
+        self.assertIsNotNone(delete_line,
+            "clear_realtime_alerts must call .delete()")
+        self.assertLess(normal_line, delete_line,
+            "state='normal' must come before .delete()")
+
+    def test_start_monitoring_enables_before_delete(self):
+        """start_realtime_monitoring must set state='normal' before deleting text."""
+        from memory_forensics_tool import MemoryForensicsGUI
+        source = inspect.getsource(MemoryForensicsGUI.start_realtime_monitoring)
+        lines = source.split('\n')
+        normal_line = None
+        delete_line = None
+        for i, line in enumerate(lines):
+            if "state='normal'" in line and 'alert_text' in line and normal_line is None:
+                normal_line = i
+            if 'alert_text.delete' in line and delete_line is None:
+                delete_line = i
+        self.assertIsNotNone(normal_line,
+            "start_realtime_monitoring must call alert_text.configure(state='normal')")
+        self.assertLess(normal_line, delete_line,
+            "state='normal' must come before alert_text.delete()")
+
+    def test_clear_all_handles_disabled_alert_text(self):
+        """clear_all must handle disabled realtime_alert_text separately."""
+        from memory_forensics_tool import MemoryForensicsGUI
+        source = inspect.getsource(MemoryForensicsGUI.clear_all)
+        # realtime_alert_text should NOT be in the generic loop (it needs special handling)
+        generic_loop_start = source.find("for widget_name in [")
+        generic_loop_end = source.find("]:", generic_loop_start)
+        generic_loop = source[generic_loop_start:generic_loop_end]
+        self.assertNotIn("'realtime_alert_text'", generic_loop,
+            "realtime_alert_text must not be in the generic clear loop — needs state='normal' first")
+
+
+# ═══════════════════════════════════════════════════════════════
+#  BUG 74: ML report entropy bar overflow
+# ═══════════════════════════════════════════════════════════════
+
+class TestBug74EntropyBarNormalized(unittest.TestCase):
+    """Bug 74: ML report feature bar must normalize entropy to 0-1 range."""
+
+    def test_entropy_bar_normalized(self):
+        """get_ml_analysis_report must normalize entropy for bar display."""
+        from memory_forensics_tool import MemoryForensicsEngine
+        source = inspect.getsource(MemoryForensicsEngine.get_ml_analysis_report)
+        self.assertIn('/ 8.0', source,
+            "Entropy must be divided by 8.0 for bar display normalization")
+
+    def test_bar_length_clamped(self):
+        """Feature bar display values must be clamped to 0-1 range."""
+        from memory_forensics_tool import MemoryForensicsEngine
+        source = inspect.getsource(MemoryForensicsEngine.get_ml_analysis_report)
+        self.assertIn('max(0.0', source,
+            "Display value must be clamped with max(0.0, ...)")
+        self.assertIn('min(1.0', source,
+            "Display value must be clamped with min(1.0, ...)")
+
+
+# ═══════════════════════════════════════════════════════════════
+#  BUG 75: ml_scan_malware must not double-scan
+# ═══════════════════════════════════════════════════════════════
+
+class TestBug75NoDoubleScan(unittest.TestCase):
+    """Bug 75: ml_scan_malware must pass result to get_ml_analysis_report."""
+
+    def test_get_ml_analysis_report_accepts_result_param(self):
+        """get_ml_analysis_report must accept optional result parameter."""
+        sig = inspect.signature(MemoryForensicsEngine.get_ml_analysis_report)
+        params = list(sig.parameters.keys())
+        self.assertIn('result', params,
+            "get_ml_analysis_report must accept 'result' parameter to avoid re-running scan")
+
+    def test_ml_scan_passes_result(self):
+        """ml_scan_malware must pass result= to get_ml_analysis_report."""
+        from memory_forensics_tool import MemoryForensicsGUI
+        source = inspect.getsource(MemoryForensicsGUI.ml_scan_malware)
+        self.assertIn('result=result', source,
+            "ml_scan_malware must pass result=result to get_ml_analysis_report")
+
+
+# ═══════════════════════════════════════════════════════════════
+#  BUG 76: _update_overview_stats must not call engine methods redundantly
+# ═══════════════════════════════════════════════════════════════
+
+class TestBug76NoRedundantCalls(unittest.TestCase):
+    """Bug 76: _update_overview_stats must call find_processes/analyze_dlls only once."""
+
+    def test_find_processes_called_once(self):
+        """find_processes() must appear only once in _update_overview_stats."""
+        from memory_forensics_tool import MemoryForensicsGUI
+        source = inspect.getsource(MemoryForensicsGUI._update_overview_stats)
+        count = source.count('find_processes()')
+        self.assertEqual(count, 1,
+            f"find_processes() called {count} times, expected 1")
+
+    def test_analyze_dlls_called_once(self):
+        """analyze_dlls() must appear only once in _update_overview_stats."""
+        from memory_forensics_tool import MemoryForensicsGUI
+        source = inspect.getsource(MemoryForensicsGUI._update_overview_stats)
+        count = source.count('analyze_dlls()')
+        self.assertEqual(count, 1,
+            f"analyze_dlls() called {count} times, expected 1")
+
+
+# ═══════════════════════════════════════════════════════════════
+#  BUG 77: _check_volatility3 must validate vol.exe in fallback loop
+# ═══════════════════════════════════════════════════════════════
+
+class TestBug77VolatilityValidation(unittest.TestCase):
+    """Bug 77: Fallback vol.exe paths must be validated with --help."""
+
+    def test_fallback_loop_validates(self):
+        """The fallback Python version loop must run --help validation."""
+        from memory_forensics_tool import MemoryForensicsGUI
+        source = inspect.getsource(MemoryForensicsGUI._check_volatility3)
+        # Count how many times '--help' appears — should be at least 2
+        # (once for Python313 check, and more for fallback loop)
+        help_count = source.count("'--help'")
+        self.assertGreaterEqual(help_count, 2,
+            f"Expected --help validation in fallback loop, found {help_count} total")
+
+    def test_no_unvalidated_return(self):
+        """Must not return vol_path without --help check in fallback."""
+        from memory_forensics_tool import MemoryForensicsGUI
+        source = inspect.getsource(MemoryForensicsGUI._check_volatility3)
+        # After the initial Python313 check, the loop should NOT have bare
+        # "return vol_path" without validation
+        loop_start = source.find("for pyver in")
+        if loop_start > -1:
+            loop_body = source[loop_start:]
+            # Every return in the loop should be after a returncode check
+            import re
+            returns_in_loop = [m.start() for m in re.finditer(r'return (?:vol_path|sys_path)', loop_body)]
+            returncode_checks = [m.start() for m in re.finditer(r'returncode == 0', loop_body)]
+            self.assertGreaterEqual(len(returncode_checks), len(returns_in_loop),
+                "Every return in fallback loop must be guarded by returncode == 0 check")
+
+
+# ═══════════════════════════════════════════════════════════════
+#  BUG 78: Report MITRE empty grid must show fallback message
+# ═══════════════════════════════════════════════════════════════
+
+class TestBug78MitreEmptyFallback(unittest.TestCase):
+    """Bug 78: MITRE section must show fallback when findings exist but none map."""
+
+    def test_mitre_uses_or_fallback(self):
+        """MITRE grid must use 'or' fallback for empty join result."""
+        from report_generator import generate_enterprise_html_report
+        source = inspect.getsource(generate_enterprise_html_report)
+        # Find the MITRE section
+        mitre_section = source[source.find('mitre-grid'):]
+        mitre_section = mitre_section[:mitre_section.find('</section>')]
+        # Must have an 'or' fallback for when join produces empty string
+        self.assertIn(' or ', mitre_section,
+            "MITRE grid must use 'or' to provide fallback when no findings map to MITRE")
+
+
+# ═══════════════════════════════════════════════════════════════
+#  BUG 79: Report severity values must use esc()
+# ═══════════════════════════════════════════════════════════════
+
+class TestBug79SeverityEscaped(unittest.TestCase):
+    """Bug 79: severity values in report must be passed through esc()."""
+
+    def test_severity_escaped_in_report(self):
+        """All severity text content must use esc()."""
+        from report_generator import generate_enterprise_html_report
+        source = inspect.getsource(generate_enterprise_html_report)
+        # Find all badge severity spans and check they use esc()
+        import re
+        # Pattern: >{f['severity']}</span> without esc() wrapping
+        unescaped = re.findall(r">\{f\['severity'\]\}</span>", source)
+        unescaped += re.findall(r">\{m\['severity'\]\}</span>", source)
+        self.assertEqual(len(unescaped), 0,
+            f"Found {len(unescaped)} unescaped severity values — all must use esc()")
 
 
 # ═══════════════════════════════════════════════════════════════

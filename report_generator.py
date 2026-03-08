@@ -452,7 +452,7 @@ body {{
 
 .risk-bar-fill {{
     height: 100%;
-    width: {risk_score}%;
+    width: {min(100, max(0, risk_score))}%;
     background: linear-gradient(90deg, var(--accent-green), var(--accent-orange), var(--accent-red));
     border-radius: 4px;
     transition: width 1s ease;
@@ -901,7 +901,7 @@ body {{
             <div class="finding-card severity-{f['severity'].lower()}">
                 <div class="finding-header">
                     <span class="finding-title">{esc(f['category'])}</span>
-                    <span class="badge badge-{f['severity'].lower()}">{f['severity']}</span>
+                    <span class="badge badge-{f['severity'].lower()}">{esc(f['severity'])}</span>
                 </div>
                 <div class="finding-detail">{esc(f['detail'])}</div>
                 <div class="indicator-list">
@@ -919,17 +919,17 @@ body {{
         <h2 class="section-title">Malware Signature Detections</h2>
         <span class="section-count">{len(malware)} found</span>
     </div>
-    {"" if not malware else '''<div class="card"><table class="data-table"><thead><tr>
+    {('''<div class="card"><table class="data-table"><thead><tr>
         <th>Malware Family</th><th>Confidence</th><th>Severity</th><th>Matched</th><th>Patterns</th>
     </tr></thead><tbody>''' +
     "".join(f'''<tr>
         <td style="font-weight:600;color:var(--text-primary)">{esc(m['name'])}</td>
         <td><span class="badge badge-info">{esc(m['confidence'])}</span></td>
-        <td><span class="badge badge-{m['severity'].lower()}">{m['severity']}</span></td>
+        <td><span class="badge badge-{m['severity'].lower()}">{esc(m['severity'])}</span></td>
         <td class="mono">{m['matched_signatures']}/{m['total_signatures']}</td>
         <td class="mono" style="font-size:11px">{esc(", ".join(m['matched_patterns'][:5]))}</td>
     </tr>''' for m in malware) +
-    '</tbody></table></div>' if malware else '<div class="card"><p style="color:var(--accent-green)">✅ No malware signatures detected in the memory dump.</p></div>'}
+    '</tbody></table></div>') if malware else '<div class="card"><p style="color:var(--accent-green)">✅ No malware signatures detected in the memory dump.</p></div>'}
 </section>
 
 <!-- ═══ BEHAVIORAL ANALYSIS ═══ -->
@@ -943,7 +943,7 @@ body {{
     <div class="finding-card severity-{f['severity'].lower()}">
         <div class="finding-header">
             <span class="finding-title">{esc(f['category'])}</span>
-            <span class="badge badge-{f['severity'].lower()}">{f['severity']}</span>
+            <span class="badge badge-{f['severity'].lower()}">{esc(f['severity'])}</span>
         </div>
         <div class="finding-detail">{esc(f['detail'])}</div>
         <div class="indicator-list">
@@ -959,14 +959,14 @@ body {{
         <h2 class="section-title">MITRE ATT&CK Mapping</h2>
     </div>
     <div class="mitre-grid">
-        {"".join(f'''
+        {("".join(f'''
         <div class="mitre-card">
             <div class="mitre-id">{mitre_map[f['category']][0]}</div>
             <div class="mitre-info">
                 <div class="mitre-technique">{mitre_map[f['category']][1]}</div>
                 <div class="mitre-tactic">{mitre_map[f['category']][2]}</div>
             </div>
-        </div>''' for f in findings if f['category'] in mitre_map) if findings else '<div class="card"><p style="color:var(--text-dim)">No MITRE ATT&CK techniques mapped.</p></div>'}
+        </div>''' for f in findings if f['category'] in mitre_map) or '<div class="card"><p style="color:var(--text-dim)">No MITRE ATT&CK techniques mapped.</p></div>') if findings else '<div class="card"><p style="color:var(--text-dim)">No MITRE ATT&CK techniques mapped.</p></div>'}
     </div>
 </section>
 
